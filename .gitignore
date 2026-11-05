@@ -313,3 +313,10 @@ scripts/pdf-collection/
 # Local screenshot artifacts from *-screenshots.spec.ts
 frontend/screenshots/
 frontend/src-tauri/libs/.variant
+
+# Dev-loop process state (scripts/run.sh)
+.run/
+
+# Rust build artifacts
+rust/target/
+rust/pdfium-native/target/

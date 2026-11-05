@@ -211,6 +211,14 @@ tasks:
       - cmd: ./gradlew build -PnoSpotless
         platforms: [linux, darwin]
 
+  dist:
+    desc: "Copy the runnable backend jar to build/backend/"
+    cmds:
+      - cmd: powershell -NoProfile -Command "New-Item -ItemType Directory -Force build/backend | Out-Null; Copy-Item (Get-ChildItem app/core/build/libs/stirling-pdf-*.jar | Sort-Object LastWriteTime | Select-Object -Last 1) build/backend/stirling-server.jar -Force"
+        platforms: [windows]
+      - cmd: mkdir -p build/backend && cp "$(ls -t app/core/build/libs/stirling-pdf-*.jar | head -1)" build/backend/stirling-server.jar
+        platforms: [linux, darwin]
+
   test:
     desc: "Run backend tests"
     cmds:

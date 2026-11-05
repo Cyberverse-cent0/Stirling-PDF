@@ -242,6 +242,13 @@ tasks:
     cmds:
       - npx vite build --mode desktop --outDir dist-desktop
 
+  dist:
+    desc: "Copy the frontend build output to build/frontend/"
+    cmds:
+      - cmd: powershell -NoProfile -Command "New-Item -ItemType Directory -Force ../build/frontend | Out-Null; Copy-Item dist/* ../build/frontend/ -Recurse -Force"
+        platforms: [windows]
+      - cmd: mkdir -p ../build/frontend && cp -r dist/. ../build/frontend/
+        platforms: [linux, darwin]
 
   storybook:
     desc: "Start Storybook dev server"

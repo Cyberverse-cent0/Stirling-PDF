@@ -19,8 +19,8 @@ includes:
   engine:
     taskfile: .taskfiles/engine.yml
     dir: engine
-  docker:
-    taskfile: .taskfiles/docker.yml
+  rust:
+    taskfile: .taskfiles/rust.yml
     dir: .
   desktop:
     taskfile: .taskfiles/desktop.yml
@@ -246,20 +246,25 @@ tasks:
 
   build:
     desc: "Build all components"
+    aliases: [build:all]
     cmds:
       - task: backend:build
       - task: frontend:build
+      - task: rust:build
+      - task: backend:dist
+      - task: frontend:dist
 
   # ============================================================
   # Test
   # ============================================================
 
   test:
-    desc: "Run ALL tests (backend + frontend + engine)"
+    desc: "Run ALL tests (backend + frontend + engine + rust)"
     cmds:
       - task: backend:test
       - task: frontend:test
       - task: engine:test
+      - task: rust:test
 
   # ============================================================
   # Lint & Format
@@ -271,6 +276,7 @@ tasks:
       - task: frontend:lint
       - task: engine:lint
       - task: desktop:lint
+      - task: rust:lint
       - task: comment-lint
 
   comment-lint:
@@ -292,6 +298,7 @@ tasks:
       - task: backend:fix
       - task: frontend:fix
       - task: engine:fix
+      - task: rust:fix
 
   format:
     desc: "Auto-fix formatting across all components"
@@ -334,6 +341,7 @@ tasks:
       - task: frontend:check
       - task: engine:check
       - task: desktop:check
+      - task: rust:check
 
   check:all:
     desc: "Full CI quality gate"
@@ -342,6 +350,7 @@ tasks:
       - task: frontend:check:all
       - task: engine:check
       - task: desktop:check
+      - task: rust:check
 
   # ============================================================
   # Clean
@@ -349,9 +358,114 @@ tasks:
 
   clean:
     desc: "Clean all build artifacts"
+    aliases: [clean:all]
     cmds:
+      - task: stop:all
       - task: backend:clean
       - task: frontend:clean
       - task: engine:clean
       - task: desktop:clean
+      - task: rust:clean
       - task: pre-commit:clean
+      - cmd: cmd /c "if exist build rmdir /s /q build & if exist .run rmdir /s /q .run"
+        platforms: [windows]
+      - cmd: rm -rf build .run
+        platforms: [linux, darwin]
+
+  # ============================================================
+  # Lifecycle (dev loop: run / restart / stop / status)
+  # Pids + logs live in .run/ via scripts/run.sh. Ports match the fixed
+  # dev defaults so the strangler topology works: browser → Rust :8081,
+  # which proxies unmigrated /api/** to Java :8080.
+  # ============================================================
+
+  rust:run:
+    desc: "Start the Rust backend in the background (:8081)"
+    cmds:
+      - bash scripts/run.sh start rust 'cd rust && exec cargo run'
+
+  rust:stop:
+    desc: "Stop the Rust backend"
+    cmds:
+      - bash scripts/run.sh stop rust
+
+  rust:restart:
+    desc: "Restart the Rust backend"
+    cmds:
+      - task: rust:stop
+      - task: rust:run
+
+  backend:run:
+    desc: "Start the Java backend in the background (:8080)"
+    cmds:
+      - bash scripts/run.sh start java 'exec env SERVER_PORT={{.PORT | default "8080"}} ./gradlew :stirling-pdf:bootRun'
+
+  backend:stop:
+    desc: "Stop the Java backend"
+    cmds:
+      - bash scripts/run.sh stop java
+
+  backend:restart:
+    desc: "Restart the Java backend"
+    cmds:
+      - task: backend:stop
+      - task: backend:run
+
+  engine:bg:
+    desc: "Start the Python engine in the background (:5001)"
+    cmds:
+      - bash scripts/run.sh start engine 'cd engine && exec uv run --locked --group engine --group engine-dev uvicorn stirling.api.app:app --host 0.0.0.0 --port {{.PORT | default "5001"}} --reload'
+
+  engine:bg:stop:
+    desc: "Stop the Python engine"
+    cmds:
+      - bash scripts/run.sh stop engine
+
+  engine:bg:restart:
+    desc: "Restart the Python engine"
+    cmds:
+      - task: engine:bg:stop
+      - task: engine:bg
+
+  frontend:run:
+    desc: "Start the frontend dev server in the background (:5173)"
+    cmds:
+      - bash scripts/run.sh start frontend 'cd frontend && exec env BACKEND_URL={{.BACKEND_URL | default "http://localhost:8080"}} npx vite --mode proprietary --port {{.PORT | default "5173"}}'
+
+  frontend:stop:
+    desc: "Stop the frontend dev server"
+    cmds:
+      - bash scripts/run.sh stop frontend
+
+  frontend:restart:
+    desc: "Restart the frontend dev server"
+    cmds:
+      - task: frontend:stop
+      - task: frontend:run
+
+  status:
+    desc: "Show which dev components are running"
+    cmds:
+      - bash scripts/run.sh status
+
+  stop:all:
+    desc: "Stop every dev component"
+    cmds:
+      - bash scripts/run.sh stop-all
+
+  dev:strangler:
+    desc: "Start the full stack: Rust (:8081) → Java (:8080) → frontend + engine"
+    cmds:
+      - task: rust:run
+      - task: backend:run
+      - bash scripts/run.sh wait-for 300 http://localhost:8081/health || true
+      - bash scripts/run.sh wait-for 600 http://localhost:8080/api/v1/info/version || true
+      - task: engine:bg
+      - task: frontend:run
+      - bash scripts/run.sh status
+
+  restart:all:
+    desc: "Restart every dev component in dependency order"
+    cmds:
+      - task: stop:all
+      - task: dev:strangler

@@ -42,18 +42,18 @@ openapi: &openapi
   - .github/workflows/check-openapi.yml
 
 docker-base: &docker-base
-  - docker/base/**
+  - runtime/docker/base/**
 
 # Dockerfiles only (base, embedded, and unoserver). The slow multi-architecture
 # (arm64) leg of the PR Docker test build runs only when a Dockerfile changes,
 # rather than for every code PR.
 dockerfiles: &dockerfiles
-  - docker/**/Dockerfile*
+  - runtime/docker/**/Dockerfile*
 
 docker: &docker
-  - docker/embedded/Dockerfile
-  - docker/embedded/Dockerfile.fat
-  - docker/embedded/Dockerfile.ultra-lite
+  - runtime/docker/embedded/Dockerfile
+  - runtime/docker/embedded/Dockerfile.fat
+  - runtime/docker/embedded/Dockerfile.ultra-lite
   - ".github/workflows/build.yml"
   - ".github/workflows/push-docker.yml"
   - scripts/init.sh
@@ -74,7 +74,7 @@ project: &project
   - gradlew.bat
   - settings.gradle
   - frontend/**
-  - docker/**
+  - runtime/docker/**
   - scripts/RestartHelper.java
   - Taskfile.yml
   - .taskfiles/backend.yml
@@ -88,7 +88,7 @@ frontend: &frontend
   - *ci
   - frontend/**
   - testing/**
-  - docker/**
+  - runtime/docker/**
   - scripts/translations/*.py
   - .taskfiles/desktop.yml
   - scripts/ignore_translation.toml
@@ -115,13 +115,21 @@ tauri: &tauri
   - Taskfile.yml
   - .taskfiles/desktop.yml
 
+# Files that affect the Rust backend server in rust/ (the strangler-fig
+# replacement for the Java API). Changes run cargo clippy + tests.
+rust-server: &rust-server
+  - *ci
+  - rust/**
+  - .taskfiles/rust.yml
+  - .github/workflows/rust-server.yml
+
 # Files that affect the AI engine, including its Python tool models, fixers,
 # and tests. The engine validation job also runs when the Java tool surfaces
 # used to generate those models change.
 engine: &engine
   - *ci
   - engine/**
-  - docker/engine/**
+  - runtime/docker/engine/**
   - app/(common|core|proprietary|saas)/src/main/java/**
   - .github/workflows/ai-engine.yml
   - Taskfile.yml
@@ -162,14 +170,14 @@ proprietary: &proprietary
   - app/proprietary/**
   - frontend/src/editor/proprietary/**
   - frontend/src/editor/core/tests/enterprise/**
-  - testing/compose/docker-compose-keycloak-oauth.yml
-  - testing/compose/docker-compose-keycloak-saml.yml
-  - testing/compose/keycloak-realm-oauth.json
-  - testing/compose/keycloak-realm-saml.json
-  - testing/compose/start-oauth-test.sh
-  - testing/compose/start-saml-test.sh
-  - testing/compose/validate-oauth-test.sh
-  - testing/compose/validate-saml-test.sh
+  - runtime/testing/compose/docker-compose-keycloak-oauth.yml
+  - runtime/testing/compose/docker-compose-keycloak-saml.yml
+  - runtime/testing/compose/keycloak-realm-oauth.json
+  - runtime/testing/compose/keycloak-realm-saml.json
+  - runtime/testing/compose/start-oauth-test.sh
+  - runtime/testing/compose/start-saml-test.sh
+  - runtime/testing/compose/validate-oauth-test.sh
+  - runtime/testing/compose/validate-saml-test.sh
   - configs/settings.yml.template
   - build.gradle
   - app/proprietary/build.gradle

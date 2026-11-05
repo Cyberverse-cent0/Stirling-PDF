@@ -41,9 +41,8 @@ jobs:
       project: ${{ steps.changes.outputs.project }}
       openapi: ${{ steps.changes.outputs.openapi }}
       frontend: ${{ steps.changes.outputs.frontend }}
-      docker-base: ${{ steps.changes.outputs.docker-base }}
-      dockerfiles: ${{ steps.changes.outputs.dockerfiles }}
       tauri: ${{ steps.changes.outputs.tauri }}
+      rust-server: ${{ steps.changes.outputs.rust-server }}
       engine: ${{ steps.changes.outputs.engine }}
       generated-models: ${{ steps.changes.outputs.generated-models }}
       proprietary: ${{ steps.changes.outputs.proprietary }}
@@ -162,39 +161,6 @@ jobs:
     uses: ./.github/workflows/check-licence.yml
     secrets: inherit
 
-  docker-compose-tests:
-    if: |
-      !cancelled() &&
-      needs.files-changed.outputs.project == 'true' &&
-      contains(fromJSON('["success", "skipped"]'), needs.gradle-cache-prime.result)
-    needs: [files-changed, gradle-cache-prime]
-    permissions:
-      actions: write
-      contents: read
-      checks: write
-    uses: ./.github/workflows/docker-compose-tests.yml
-    secrets: inherit
-    with:
-      docker-base-changed: ${{ needs.files-changed.outputs.docker-base }}
-
-  # The image builds compile the code inside their own build stage and do
-  # not touch the Gradle cache, so they start with the rest of the fan-out
-  # instead of waiting ~9 minutes for the backend matrix. That wait became
-  # the critical path once the e2e matrix was sharded.
-  test-build-docker-images:
-    if: |
-      github.event_name == 'pull_request' &&
-      needs.files-changed.outputs.project == 'true'
-    needs: [files-changed]
-    permissions:
-      contents: read
-      packages: read
-    uses: ./.github/workflows/test-build-docker.yml
-    secrets: inherit
-    with:
-      docker-base-changed: ${{ needs.files-changed.outputs.docker-base }}
-      dockerfiles-changed: ${{ needs.files-changed.outputs.dockerfiles }}
-
   tauri-build:
     if: |
       !cancelled() &&
@@ -224,6 +190,15 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/rust-lint.yml
+
+  rust-server:
+    if: |
+      !cancelled() &&
+      needs.files-changed.outputs.rust-server == 'true'
+    needs: [files-changed]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/rust-server.yml
 
   ai-engine:
     if: needs.files-changed.outputs.engine == 'true'
@@ -278,7 +253,6 @@ jobs:
     needs:
       - build
       - playwright-e2e-live
-      - docker-compose-tests
       - frontend-validation
     permissions:
       contents: read
@@ -309,10 +283,9 @@ jobs:
       - playwright-e2e-live
       - playwright-e2e-enterprise
       - check-licence
-      - docker-compose-tests
-      - test-build-docker-images
       - tauri-build
       - rust-lint
+      - rust-server
       - ai-engine
       - generated-models
       - pre-commit
@@ -338,10 +311,9 @@ jobs:
             playwright-e2e-live=${{ needs.playwright-e2e-live.result }}
             playwright-e2e-enterprise=${{ needs.playwright-e2e-enterprise.result }}
             check-licence=${{ needs.check-licence.result }}
-            docker-compose-tests=${{ needs.docker-compose-tests.result }}
-            test-build-docker-images=${{ needs.test-build-docker-images.result }}
             tauri-build=${{ needs.tauri-build.result }}
             rust-lint=${{ needs.rust-lint.result }}
+            rust-server=${{ needs.rust-server.result }}
             ai-engine=${{ needs.ai-engine.result }}
             generated-models=${{ needs.generated-models.result }}
             pre-commit=${{ needs.pre-commit.result }}

@@ -1,0 +1,50 @@
+version: '3'
+
+tasks:
+  dev:
+    desc: "Start the Rust backend server"
+    dir: rust
+    cmds:
+      - cargo run
+
+  build:
+    desc: "Build the Rust backend (release)"
+    dir: rust
+    cmds:
+      - cargo build --release
+      - cmd: powershell -NoProfile -Command "New-Item -ItemType Directory -Force ../build/rust | Out-Null; Copy-Item target/release/stirling-server.exe ../build/rust/stirling-server.exe -Force"
+        platforms: [windows]
+      - cmd: mkdir -p ../build/rust && cp target/release/stirling-server ../build/rust/stirling-server
+        platforms: [linux, darwin]
+
+  test:
+    desc: "Run Rust backend tests"
+    dir: rust
+    cmds:
+      - cargo test
+
+  lint:
+    desc: "Lint Rust backend (clippy + fmt check)"
+    dir: rust
+    cmds:
+      - cargo clippy --all-targets -- -D warnings
+      - cargo fmt --check
+
+  fix:
+    desc: "Auto-fix Rust backend (clippy + fmt)"
+    dir: rust
+    cmds:
+      - cargo clippy --all-targets --fix --allow-dirty -- -D warnings
+      - cargo fmt
+
+  clean:
+    desc: "Remove Rust build artifacts"
+    dir: rust
+    cmds:
+      - cargo clean
+
+  check:
+    desc: "Rust backend quality gate"
+    cmds:
+      - task: lint
+      - task: test
