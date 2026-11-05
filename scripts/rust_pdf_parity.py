@@ -64,6 +64,28 @@ CASES = [
         "zip",
         (("bookmarkLevel", "1"), ("includeMetadata", "false")),
     ),
+    Case(
+        "general/scale-pages-a4",
+        "/api/v1/general/scale-pages",
+        "pdf",
+        (("pageSize", "A4"), ("orientation", "PORTRAIT"), ("scaleFactor", "1")),
+    ),
+    Case("general/scale-pages-keep", "/api/v1/general/scale-pages", "pdf", (("pageSize", "KEEP"),)),
+    Case(
+        "general/crop",
+        "/api/v1/general/crop",
+        "pdf",
+        (
+            ("x", "50"),
+            ("y", "50"),
+            ("width", "200"),
+            ("height", "200"),
+            ("pageNumbers", "all"),
+            ("autoCrop", "false"),
+            ("removeDataOutsideCrop", "false"),
+        ),
+    ),
+    Case("general/pdf-to-single-page", "/api/v1/general/pdf-to-single-page", "pdf"),
     Case("general/merge-pdfs", "/api/v1/general/merge-pdfs", "pdf", files="pair"),
     Case("misc/decompress-pdf", "/api/v1/misc/decompress-pdf", "pdf"),
     Case(
@@ -82,6 +104,18 @@ CASES = [
             ("trapped", "False"),
         ),
     ),
+    Case("misc/flatten-forms", "/api/v1/misc/flatten", "pdf", (("flattenOnlyForms", "true"),)),
+    Case(
+        "misc/compress-pdf",
+        "/api/v1/misc/compress-pdf",
+        "pdf",
+        (
+            ("optimizeLevel", "1"),
+            ("linearize", "false"),
+            ("normalize", "false"),
+            ("grayscale", "false"),
+        ),
+    ),
 ]
 
 KNOWN_DIFFS = [
@@ -89,6 +123,8 @@ KNOWN_DIFFS = [
     ("security-info", re.compile(r"^keyLength$")),
     ("font-info", re.compile(r"^(fonts|fontCount)$")),
     ("form-fields", re.compile(r"^fieldCount$")),
+    ("scale-pages", re.compile(r"^pages\[\d+\]\.content(Operations|Operands|Operators)$")),
+    ("crop", re.compile(r"^pages\[\d+\]\.content(Operations|Operands|Operators)$")),
 ]
 
 
@@ -304,7 +340,7 @@ def split_known(case_name: str, diffs: list[Diff]) -> tuple[list[Diff], list[Dif
     known: list[Diff] = []
     semantic: list[Diff] = []
     for diff in diffs:
-        if any(case_name.endswith(endpoint) and pattern.search(diff.path) for endpoint, pattern in KNOWN_DIFFS):
+        if any(endpoint in case_name and pattern.search(diff.path) for endpoint, pattern in KNOWN_DIFFS):
             known.append(diff)
         else:
             semantic.append(diff)

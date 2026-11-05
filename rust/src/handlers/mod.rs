@@ -4,7 +4,9 @@ pub mod jobs;
 pub mod merge;
 pub mod misc;
 pub mod proxy;
+pub mod security;
 pub mod split;
+pub mod transform;
 
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -39,9 +41,45 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/general/split-pdf-by-chapters",
             post(split::split_by_chapters),
         )
+        .route("/api/v1/general/scale-pages", post(transform::scale_pages))
+        .route("/api/v1/general/crop", post(transform::crop_pdf))
+        .route(
+            "/api/v1/general/pdf-to-single-page",
+            post(general::pdf_to_single_page),
+        )
         .route("/api/v1/misc/decompress-pdf", post(misc::decompress_pdf))
         .route("/api/v1/misc/update-metadata", post(misc::update_metadata))
+        .route("/api/v1/misc/flatten", post(misc::flatten))
+        .route("/api/v1/misc/compress-pdf", post(misc::compress_pdf))
         .route("/api/v1/misc/show-javascript", post(misc::show_javascript))
+        .route(
+            "/api/v1/misc/list-attachments",
+            post(misc::list_attachments),
+        )
+        .route(
+            "/api/v1/misc/extract-single-attachment",
+            post(misc::extract_single_attachment),
+        )
+        .route(
+            "/api/v1/misc/extract-attachments",
+            post(misc::extract_attachments),
+        )
+        .route(
+            "/api/v1/misc/rename-attachment",
+            post(misc::rename_attachment),
+        )
+        .route(
+            "/api/v1/misc/delete-attachment",
+            post(misc::delete_attachment),
+        )
+        .route(
+            "/api/v1/security/sanitize-pdf",
+            post(security::sanitize_pdf),
+        )
+        .route(
+            "/api/v1/security/get-info-on-pdf",
+            post(security::get_info_on_pdf),
+        )
         .route("/api/v1/analysis/page-count", post(analysis::page_count))
         .route("/api/v1/analysis/basic-info", post(analysis::basic_info))
         .route(

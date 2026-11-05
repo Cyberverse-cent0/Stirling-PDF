@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 
 use axum::response::Response;
-use lopdf::{Dictionary, Document, Object, ObjectId};
+use lopdf::{Document, Object, ObjectId};
 
 use crate::error::{AppError, AppResult};
 use crate::handlers::jobs::AppState;
@@ -307,10 +307,10 @@ fn clean_resources(
             return None;
         }
     }
-    let mut dict_obj = resolve_owned(doc, resources)?;
-    let xobjects = dict_of(&dict_obj)?.get(b"XObject").ok()?.clone();
-    let mut xobject_obj = resolve_owned(doc, &xobjects)?;
-    let xobject_dict = dict_mut(&mut xobject_obj)?;
+    let mut dict_obj = pdfdoc::resolve_owned(doc, resources)?;
+    let xobjects = pdfdoc::dict_of(&dict_obj)?.get(b"XObject").ok()?.clone();
+    let mut xobject_obj = pdfdoc::resolve_owned(doc, &xobjects)?;
+    let xobject_dict = pdfdoc::dict_mut(&mut xobject_obj)?;
 
     // Rebuilt in order rather than `remove`d in place: `Dictionary::remove`
     // swap-removes, which would reorder the XObject dictionary.
@@ -318,7 +318,7 @@ fn clean_resources(
     for (name, entry) in xobject_dict.iter() {
         let name = name.clone();
         let entry = entry.clone();
-        let Some(entry_dict) = peek_dict(doc, &entry) else {
+        let Some(entry_dict) = pdfdoc::peek_dict(doc, &entry) else {
             kept.push((name, entry));
             continue;
         };
@@ -332,21 +332,21 @@ fn clean_resources(
         match subtype.as_deref() {
             Some(b"Image") => {}
             Some(b"Form") => {
-                let Some(mut form_obj) = resolve_owned(doc, &entry) else {
+                let Some(mut form_obj) = pdfdoc::resolve_owned(doc, &entry) else {
                     kept.push((name, entry));
                     continue;
                 };
                 let Some(form_resources) =
-                    dict_mut(&mut form_obj).and_then(|d| d.get(b"Resources").ok().cloned())
+                    pdfdoc::dict_mut(&mut form_obj).and_then(|d| d.get(b"Resources").ok().cloned())
                 else {
                     kept.push((name, entry));
                     continue;
                 };
                 match clean_resources(doc, &form_resources, visited) {
                     Some(cleaned) => {
-                        store_object(
+                        pdfdoc::store_object(
                             doc,
-                            dict_mut(&mut form_obj)?,
+                            pdfdoc::dict_mut(&mut form_obj)?,
                             b"Resources",
                             &form_resources,
                             cleaned,
@@ -367,12 +367,161 @@ fn clean_resources(
     }
     *xobject_dict = kept.into_iter().collect();
 
-    store_object(
+    pdfdoc::store_object(
         doc,
-        dict_mut(&mut dict_obj)?,
+        pdfdoc::dict_mut(&mut dict_obj)?,
         b"XObject",
         &xobjects,
         xobject_obj,
     );
     Some(dict_obj)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit;
+    use lopdf::{dictionary, Document};
+
+    fn upload(bytes: Vec<u8>) -> Vec<Upload> {
+        vec![Upload {
+            name: "in.pdf".into(),
+            bytes,
+        }]
+    }
+
+    /// `/Subtype` name of an XObject entry, following references.
+    fn xobject_subtype(doc: &Document, entry: &Object) -> Option<Vec<u8>> {
+        pdfdoc::peek_dict(doc, entry)
+            .and_then(|d| d.get(b"Subtype").ok())
+            .and_then(|s| s.as_name().ok())
+            .map(<[u8]>::to_vec)
+    }
+
+    /// XObject name → subtype under a `/Resources` value.
+    fn xobject_kinds(doc: &Document, resources: &Object) -> Vec<(String, Vec<u8>)> {
+        let Some(resources_dict) = pdfdoc::peek_dict(doc, resources) else {
+            return Vec::new();
+        };
+        let Some(xobjects) = resources_dict.get(b"XObject").ok() else {
+            return Vec::new();
+        };
+        let (_, resolved) = doc.dereference(xobjects).unwrap();
+        let Some(xobject_dict) = pdfdoc::dict_of(resolved) else {
+            return Vec::new();
+        };
+        xobject_dict
+            .iter()
+            .map(|(name, entry)| {
+                (
+                    String::from_utf8_lossy(name).into_owned(),
+                    xobject_subtype(doc, entry).unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn removes_images_and_recurses_into_form_xobjects() {
+        let mut pdf = testkit::Pdf::new();
+        let im1 = pdf.add_stream(testkit::image_xobject(), &[255, 0, 0]);
+        let im_nested = pdf.add_stream(testkit::image_xobject(), &[0, 255, 0]);
+        let ps = pdf.add_stream(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "PS",
+            },
+            b"",
+        );
+        let form = pdf.add_stream(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => Object::Array(vec![0.into(), 0.into(), 10.into(), 10.into()]),
+                "Resources" => dictionary! {
+                    "XObject" => dictionary! {
+                        "ImN" => Object::Reference(im_nested),
+                    },
+                },
+            },
+            b"q Q",
+        );
+        pdf.edit_page(|page| {
+            page.set(
+                "Resources",
+                dictionary! {
+                    "XObject" => dictionary! {
+                        "Im1" => Object::Reference(im1),
+                        "Fm1" => Object::Reference(form),
+                        "Ps1" => Object::Reference(ps),
+                    },
+                },
+            );
+        });
+        let bytes = pdf.bytes();
+
+        let response =
+            remove_images_work(AppState::new(None), HashMap::new(), upload(bytes), vec![]).unwrap();
+        let doc = testkit::response_document(response).await;
+
+        let page = doc.get_dictionary(pdf.page).unwrap();
+        let resources = page.get(b"Resources").unwrap();
+        let kinds = xobject_kinds(&doc, resources);
+        assert_eq!(
+            kinds,
+            vec![
+                ("Fm1".to_string(), b"Form".to_vec()),
+                ("Ps1".to_string(), b"PS".to_vec()),
+            ]
+        );
+
+        // The form XObject survives but its own image is gone.
+        let form_entry = pdfdoc::peek_dict(&doc, resources)
+            .and_then(|r| r.get(b"XObject").ok())
+            .map(|xo| {
+                let (_, resolved) = doc.dereference(xo).unwrap();
+                pdfdoc::dict_of(resolved)
+                    .unwrap()
+                    .get(b"Fm1")
+                    .unwrap()
+                    .clone()
+            })
+            .unwrap();
+        let form_dict = pdfdoc::peek_dict(&doc, &form_entry).unwrap();
+        let form_resources = form_dict.get(b"Resources").unwrap();
+        assert!(xobject_kinds(&doc, form_resources).is_empty());
+    }
+
+    #[tokio::test]
+    async fn leaves_documents_without_images_untouched() {
+        let mut pdf = testkit::Pdf::new();
+        let bytes = pdf.bytes();
+
+        let response =
+            remove_images_work(AppState::new(None), HashMap::new(), upload(bytes), vec![]).unwrap();
+        let doc = testkit::response_document(response).await;
+        assert_eq!(doc.get_pages().len(), 1);
+    }
+}
+
+/// `POST /api/v1/general/pdf-to-single-page` — stacks every page's
+/// appearance into one tall page, like `ToSinglePageController`.
+#[stirling_macros::endpoint]
+fn pdf_to_single_page(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    _params: Vec<(String, String)>,
+) -> AppResult<Response> {
+    let Some(upload) = uploads.into_iter().next() else {
+        return Err(AppError::BadRequest(format!("{FILE_FIELD} is required")));
+    };
+
+    let document = pdfdoc::load(&upload.name, &upload.bytes)?;
+    let mut single = pdfdoc::to_single_page(&document)?;
+    let bytes = pdfdoc::save(&mut single)?;
+    Ok(pdf_response(
+        bytes,
+        &output_name(Some(&upload.name), "_singlePage.pdf"),
+    ))
 }
