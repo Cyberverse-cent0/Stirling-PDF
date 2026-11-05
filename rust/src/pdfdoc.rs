@@ -818,6 +818,18 @@ pub fn crop_prefix(x: f64, y: f64, width: f64, height: f64) -> String {
     )
 }
 
+/// Clip to the new page box, then translate so the source section lands at
+/// the origin — the same order `SplitPdfBySectionsController` uses.
+pub fn section_prefix(width: f64, height: f64, tx: f64, ty: f64) -> String {
+    format!(
+        "q\n0 0 {} {} re\nW\nn\n1 0 0 1 {} {} cm\n",
+        pdf_num(width),
+        pdf_num(height),
+        pdf_num(tx),
+        pdf_num(ty)
+    )
+}
+
 fn annot_rect(doc: &Document, object: &Object) -> Option<[f64; 4]> {
     let dict = peek_dict(doc, object)?;
     let rect = dict.get(b"Rect").ok()?;
@@ -2136,6 +2148,16 @@ mod tests {
 
         let catalog = single.catalog().unwrap();
         assert!(catalog.has(b"OCProperties"));
+    }
+
+    #[test]
+    fn to_single_page_handles_empty_document() {
+        // Java still emits one page (0x0 MediaBox) for a page-less source.
+        let src = new_document();
+        let dst = to_single_page(&src).unwrap();
+        assert_eq!(dst.get_pages().len(), 1);
+        let page_id = dst.get_pages().into_values().next().unwrap();
+        assert_eq!(media_box(&dst, page_id).unwrap(), [0.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
