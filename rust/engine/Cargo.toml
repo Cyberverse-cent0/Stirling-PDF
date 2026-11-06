@@ -1,0 +1,49 @@
+[package]
+name = "stirling-engine"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Rust AI engine for Stirling PDF (replaces the engine/ Python service)"
+
+[dependencies]
+axum = { version = "0.8", features = ["multipart"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = { version = "0.8", features = ["chrono"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+futures-util = "0.3"
+bytes = "1"
+dotenvy = "0.15"
+subtle = "2"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+rayon = "1"
+async-trait = "0.1"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "postgres",
+    "chrono",
+    "json",
+] }
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"
+
+[dev-dependencies]
+typify = "0.4"
+prettyplease = "0.2"
+syn = { version = "2", features = ["full", "parsing"] }
+serde_json = "1"
+schemars = { version = "0.8", features = ["chrono"] }

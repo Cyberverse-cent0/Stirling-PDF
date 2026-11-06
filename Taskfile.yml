@@ -265,6 +265,7 @@ tasks:
       - task: frontend:test
       - task: engine:test
       - task: rust:test
+      - task: rust:engine:test
 
   # ============================================================
   # Lint & Format
@@ -277,6 +278,7 @@ tasks:
       - task: engine:lint
       - task: desktop:lint
       - task: rust:lint
+      - task: rust:engine:lint
       - task: comment-lint
 
   comment-lint:
@@ -299,6 +301,7 @@ tasks:
       - task: frontend:fix
       - task: engine:fix
       - task: rust:fix
+      - task: rust:engine:fix
 
   format:
     desc: "Auto-fix formatting across all components"
@@ -342,6 +345,7 @@ tasks:
       - task: engine:check
       - task: desktop:check
       - task: rust:check
+      - task: rust:engine:check
 
   check:all:
     desc: "Full CI quality gate"
@@ -351,6 +355,7 @@ tasks:
       - task: engine:check
       - task: desktop:check
       - task: rust:check
+      - task: rust:engine:check
 
   # ============================================================
   # Clean
@@ -366,6 +371,7 @@ tasks:
       - task: engine:clean
       - task: desktop:clean
       - task: rust:clean
+      - task: rust:engine:clean
       - task: pre-commit:clean
       - cmd: cmd /c "if exist build rmdir /s /q build & if exist .run rmdir /s /q .run"
         platforms: [windows]

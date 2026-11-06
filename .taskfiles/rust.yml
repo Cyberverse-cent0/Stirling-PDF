@@ -27,8 +27,8 @@ tasks:
     desc: "Lint Rust backend (clippy + fmt check)"
     dir: rust
     cmds:
-      - cargo clippy --all-targets -- -D warnings
-      - cargo fmt --check
+      - cargo clippy --all-targets --all-features -- -D warnings
+      - cargo fmt --all -- --check
 
   fix:
     desc: "Auto-fix Rust backend (clippy + fmt)"
@@ -48,3 +48,53 @@ tasks:
     cmds:
       - task: lint
       - task: test
+
+  engine:dev:
+    desc: "Start the Rust AI engine (:5001)"
+    dir: rust/engine
+    cmds:
+      - cargo run
+
+  engine:build:
+    desc: "Build the Rust AI engine (release)"
+    dir: rust/engine
+    cmds:
+      - cargo build --release
+
+  engine:test:
+    desc: "Run Rust AI engine tests"
+    dir: rust/engine
+    cmds:
+      - cargo test --all-targets
+
+  engine:lint:
+    desc: "Lint Rust AI engine (clippy + fmt check)"
+    dir: rust/engine
+    cmds:
+      - cargo clippy --all-targets --all-features -- -D warnings
+      - cargo fmt --all -- --check
+
+  engine:fix:
+    desc: "Auto-fix Rust AI engine (clippy + fmt)"
+    dir: rust/engine
+    cmds:
+      - cargo clippy --all-targets --fix --allow-dirty -- -D warnings
+      - cargo fmt
+
+  engine:clean:
+    desc: "Remove Rust AI engine build artifacts"
+    dir: rust/engine
+    cmds:
+      - cargo clean
+
+  engine:parity:
+    desc: "Compare Python and Rust engine responses on deterministic endpoints"
+    dir: rust/engine
+    cmds:
+      - ./scripts/parity_check.sh
+
+  engine:check:
+    desc: "Rust AI engine quality gate"
+    cmds:
+      - task: engine:lint
+      - task: engine:test
