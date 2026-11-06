@@ -12,9 +12,9 @@
 #![allow(dead_code)]
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::error::{AppError, AppResult};
@@ -95,7 +95,30 @@ fn candidates(dir: &std::path::Path, program: &str) -> Vec<PathBuf> {
     }
 }
 
-/// Locates `program` on `PATH` (plus `path_dirs`) without a shell.
+/// Engine directories bundled with the installation, searched after a
+/// spec's own `path_dirs` and before `PATH`: `STIRLING_ENGINES_DIR`
+/// (path-separated, for installers that keep engines outside the exe
+/// dir) then `<current-exe>/engines`, the layout desktop resource
+/// bundling produces. Cached — the environment does not change mid-run.
+fn bundled_engine_dirs() -> &'static [PathBuf] {
+    static DIRS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    DIRS.get_or_init(|| {
+        let mut dirs = Vec::new();
+        if let Some(env) = std::env::var_os("STIRLING_ENGINES_DIR") {
+            dirs.extend(std::env::split_paths(&env).filter(|p| !p.as_os_str().is_empty()));
+        }
+        if let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|p| p.to_path_buf()))
+        {
+            dirs.push(dir.join("engines"));
+        }
+        dirs
+    })
+}
+
+/// Locates `program` on `PATH` (plus `path_dirs` and bundled engine
+/// dirs) without a shell.
 pub fn find_executable(program: &str, path_dirs: &[PathBuf]) -> Option<PathBuf> {
     let is_exe = |p: &PathBuf| {
         if cfg!(windows) {
@@ -108,7 +131,7 @@ pub fn find_executable(program: &str, path_dirs: &[PathBuf]) -> Option<PathBuf> 
                     .unwrap_or(false)
         }
     };
-    for dir in path_dirs {
+    for dir in path_dirs.iter().chain(bundled_engine_dirs().iter()) {
         if let Some(found) = candidates(dir, program).into_iter().find(is_exe) {
             return Some(found);
         }
@@ -120,6 +143,19 @@ pub fn find_executable(program: &str, path_dirs: &[PathBuf]) -> Option<PathBuf> 
         }
     }
     None
+}
+
+/// Program for `Command::new` call sites that bypass `EngineSpec`:
+/// resolves bundled dirs and `PATH`, but passes through qualified paths
+/// (`customPaths.operations` entries) and unresolved names unchanged —
+/// the exec then does its own PATH lookup and reports the usual
+/// `NotFound`.
+pub fn resolve(program: &str) -> PathBuf {
+    let path = Path::new(program);
+    if path.is_absolute() || program.contains(['/', '\\']) {
+        return path.to_path_buf();
+    }
+    find_executable(program, &[]).unwrap_or_else(|| path.to_path_buf())
 }
 
 /// Runs the spec to completion or timeout. Output is drained on reader

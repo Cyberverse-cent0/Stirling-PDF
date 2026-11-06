@@ -32,6 +32,7 @@ sqlx = { version = "0.8", default-features = false, features = [
     "chrono",
     "json",
 ] }
+rust_decimal = "1.43.0"
 
 [profile.dev.package."*"]
 opt-level = 2

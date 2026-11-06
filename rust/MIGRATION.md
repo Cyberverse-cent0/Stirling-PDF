@@ -311,8 +311,10 @@ All need non-lopdf machinery; plan is sidecar processes, not pure Rust:
 - pdf/html, html/pdf, url/pdf, pdf/text, markdown/pdf, ebook/pdf, file/pdf,
   eml/pdf — weasyprint/chromium sidecar or engine; decide per endpoint
 - pdf/word — officeconvert/LibreOffice sidecar; pdf/xlsx, pdf/csv —
-  done natively (`src/tabula.rs` ruling detection → CSV/zip or a
-  hand-built OOXML workbook, no engine); extract-csv/xlsx still open
+  done natively (`src/tabula.rs`: ruling-lattice detection plus a
+  borderless text-edge pass that finds column gutters in aligned text;
+  → CSV/zip or a hand-built OOXML workbook, no engine);
+  extract-csv/xlsx still open
 - pdf/video — ffmpeg sidecar
 - office conversions (docx/pptx/xlsx → pdf) — LibreOffice headless sidecar
   (already a project dependency for the Java backend)

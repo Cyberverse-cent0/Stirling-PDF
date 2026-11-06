@@ -53,6 +53,17 @@ pub struct OrchestratorRequest {
 
 pub type OrchestratorResponseUnion = OrchestratorResponse;
 
+/// `get_extracted_text_artifact` — the extracted-text artifact carried on a
+/// resume-turn request, if any.
+pub fn get_extracted_text_artifact(
+    request: &OrchestratorRequest,
+) -> Option<&Vec<crate::contracts::common::ExtractedFileText>> {
+    request.artifacts.iter().find_map(|a| match a {
+        WorkflowArtifact::ExtractedText { files } => Some(files),
+        _ => None,
+    })
+}
+
 // Keep the FileId import honest for downstream modules that re-export it.
 #[allow(dead_code)]
 type _FileIdAlias = FileId;

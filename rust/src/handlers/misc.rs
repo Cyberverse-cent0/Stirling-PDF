@@ -772,7 +772,9 @@ fn run_ghostscript(
     std::fs::write(&input_path, input)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("gs input: {e}")))?;
 
-    let mut command = std::process::Command::new("gs");
+    let mut command = std::process::Command::new(crate::convert::resolve(
+        &crate::settings::engine_program("gs"),
+    ));
     command
         .arg("-sDEVICE=pdfwrite")
         .arg("-dCompatibilityLevel=1.5")
@@ -910,7 +912,9 @@ fn run_qpdf(
     args.push(input_path.display().to_string());
     args.push(output_path.display().to_string());
 
-    let mut command = std::process::Command::new("qpdf");
+    let mut command = std::process::Command::new(crate::convert::resolve(
+        &crate::settings::engine_program("qpdf"),
+    ));
     if level >= 8 && !cfg!(windows) {
         command.arg("env").arg("QPDF_ZOPFLI=silent");
     }
@@ -2314,22 +2318,24 @@ fn replace_invert_cmyk_work(
     std::fs::write(&input_path, &upload.bytes)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("cmyk input: {e}")))?;
 
-    let status = std::process::Command::new("gs")
-        .arg("-sDEVICE=pdfwrite")
-        .arg("-dCompatibilityLevel=1.5")
-        .arg("-dPDFSETTINGS=/prepress")
-        .arg("-dNOPAUSE")
-        .arg("-dQUIET")
-        .arg("-dBATCH")
-        .arg("-sProcessColorModel=DeviceCMYK")
-        .arg("-sColorConversionStrategy=CMYK")
-        .arg("-sColorConversionStrategyForImages=CMYK")
-        .arg(format!("-sOutputFile={}", output_path.display()))
-        .arg(&input_path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|e| AppError::BadRequest(format!("Ghostscript unavailable: {e}")))?;
+    let status = std::process::Command::new(crate::convert::resolve(
+        &crate::settings::engine_program("gs"),
+    ))
+    .arg("-sDEVICE=pdfwrite")
+    .arg("-dCompatibilityLevel=1.5")
+    .arg("-dPDFSETTINGS=/prepress")
+    .arg("-dNOPAUSE")
+    .arg("-dQUIET")
+    .arg("-dBATCH")
+    .arg("-sProcessColorModel=DeviceCMYK")
+    .arg("-sColorConversionStrategy=CMYK")
+    .arg("-sColorConversionStrategyForImages=CMYK")
+    .arg(format!("-sOutputFile={}", output_path.display()))
+    .arg(&input_path)
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status()
+    .map_err(|e| AppError::BadRequest(format!("Ghostscript unavailable: {e}")))?;
     if !status.success() {
         return Err(AppError::BadRequest(
             "CMYK color space conversion failed".into(),
@@ -2804,14 +2810,14 @@ fn remove_blanks(
 /// `auto-split-pdf`'s QR divider detection. `probe` writes the PDF once
 /// and verifies the binary; each page renders through `png16m`.
 pub(crate) struct BlankRasterizer {
-    program: String,
+    program: std::path::PathBuf,
     input: std::path::PathBuf,
     dir: tempfile::TempDir,
 }
 
 impl BlankRasterizer {
     pub(crate) fn probe(name: &str, bytes: &[u8]) -> Option<Self> {
-        let program = crate::settings::engine_program("gs");
+        let program = crate::convert::resolve(&crate::settings::engine_program("gs"));
         let ok = std::process::Command::new(&program)
             .arg("--version")
             .stdout(std::process::Stdio::null())

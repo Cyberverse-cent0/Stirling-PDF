@@ -49,8 +49,10 @@ is gated by `endpointconfig::probe_engines` (mirrors
 - Watch: `downloadHtml=true` bypasses the engine entirely — cheap win.
 
 ### `pdf/csv` — DONE (pure Rust, no engine)
-- `src/tabula.rs` ports Tabula's ruling-line + text-edge detection over
-  `text.rs` positioned runs; `extract_table_fragments` in `convert.rs`
+- `src/tabula.rs` ports Tabula's ruling-lattice detection plus a
+  borderless text-edge pass (runs of >=2 lines splitting at persistent
+  x-gutters; lattice wins on overlap) over `text.rs` positioned runs;
+  `extract_table_fragments` in `convert.rs`
   maps each detected table to a `TableFragment { page, table_index, rows }`.
 - `csv_fragment_bytes` reproduces `CSVFormat.EXCEL` + `QuoteMode.ALL`:
   every field double-quoted, inner quotes doubled, CRLF records, plus
@@ -63,8 +65,12 @@ is gated by `endpointconfig::probe_engines` (mirrors
   `NO_TABLES_FOUND`. `pageNumbers` selection honoured via `page_select`.
 - Verified live: `bordered-table-test_widget.pdf` → clean 4×3 CSV;
   `many-tables-test_stress.pdf` → 11-entry ZIP across 4 pages;
-  `multi-column-test_lorem.pdf` (no tables) → 422; `images.pdf`
-  (image-only) → 422 NO_TEXT_LAYER; malformed input → 400.
+  `tables.pdf`/`bank_statement.pdf` (borderless, whitespace-aligned) →
+  correct CSVs via the text-edge pass; `table-sample.pdf` /
+  `merged-table-sample.pdf` → correct cells (spanning header cells
+  become empty strings); `multi-column-test_lorem.pdf`,
+  `justified-sample.pdf`, `classified_invoice.pdf` (prose) → 422;
+  `images.pdf` (image-only) → 422 NO_TEXT_LAYER; malformed → 400.
 
 ### `pdf/xlsx` — DONE (Tabula-equivalent path only)
 - Same `extract_table_fragments` pipeline; `xlsx_workbook` writes a

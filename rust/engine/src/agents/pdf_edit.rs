@@ -16,8 +16,10 @@ use crate::contracts::common::{
     format_conversation_history, format_file_names, AiFile, NeedContentFileRequest,
     NeedContentResponse, PdfContentType, SupportedCapability, ToolOperationStep,
 };
+use crate::contracts::orchestrator::OrchestratorRequest;
 use crate::contracts::pdf_edit::{
-    EditCannotDoPayload, EditClarificationPayload, EditPlanPayload, PdfEditRequest, PdfEditResponse,
+    EditCannotDoPayload, EditClarificationPayload, EditPlanPayload, PdfEditRequest,
+    PdfEditResponse, PdfEditTerminalResponse,
 };
 use crate::error::{ApiError, ApiResult};
 use crate::llm::client::LlmClient;
@@ -161,9 +163,51 @@ impl PdfEditAgent {
         }
     }
 
-    /// Entry point for the `/api/v1/pdf/edit` route. The orchestrator's
-    /// `orchestrate` delegate lands with the orchestrator port.
+    /// Entry point for the `/api/v1/pdf/edit` route.
     pub async fn handle(&self, request: &PdfEditRequest) -> ApiResult<PdfEditResponse> {
+        self.handle_inner(request, true).await
+    }
+
+    /// Terminal outcomes only — `handle(allow_need_content=False)` in
+    /// Python. Used by the agent-draft flow where a `need_content` pause
+    /// cannot be honoured.
+    pub async fn handle_terminal(
+        &self,
+        request: &PdfEditRequest,
+    ) -> ApiResult<PdfEditTerminalResponse> {
+        match self.handle_inner(request, false).await? {
+            PdfEditResponse::Plan(p) => Ok(PdfEditTerminalResponse::Plan(p)),
+            PdfEditResponse::NeedClarification(p) => {
+                Ok(PdfEditTerminalResponse::NeedClarification(p))
+            }
+            PdfEditResponse::CannotDo(p) => Ok(PdfEditTerminalResponse::CannotDo(p)),
+            PdfEditResponse::NeedContent(_) => Err(ApiError::internal(
+                "need_content produced with allow_need_content=false".to_string(),
+            )),
+        }
+    }
+
+    /// Orchestrator delegate entry — adapts the orchestrator request shape
+    /// (carrying artifacts) into a `PdfEditRequest`.
+    pub async fn orchestrate(&self, request: &OrchestratorRequest) -> ApiResult<PdfEditResponse> {
+        let page_text = crate::contracts::orchestrator::get_extracted_text_artifact(request)
+            .cloned()
+            .unwrap_or_default();
+        self.handle(&PdfEditRequest {
+            user_message: request.user_message.clone(),
+            files: request.files.clone(),
+            conversation_history: request.conversation_history.clone(),
+            page_text,
+            enabled_endpoints: request.enabled_endpoints.clone(),
+        })
+        .await
+    }
+
+    async fn handle_inner(
+        &self,
+        request: &PdfEditRequest,
+        allow_need_content: bool,
+    ) -> ApiResult<PdfEditResponse> {
         let (supported, unavailable) = classify_operations(request);
         if supported.is_empty() {
             return Ok(PdfEditResponse::CannotDo(EditCannotDoPayload {
@@ -176,7 +220,7 @@ impl PdfEditAgent {
         let mut planned = None;
         for _attempt in 0..2 {
             let selection = self
-                .select_plan(request, &supported, &unavailable, true, &repair_note)
+                .select_plan(request, &supported, &unavailable, allow_need_content, &repair_note)
                 .await?;
             tracing::info!("[pdf-edit] selection -> {}", selection.outcome_name());
             match selection {

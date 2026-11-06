@@ -256,6 +256,7 @@ fn reason_value(reason: Option<DisableReason>) -> Value {
         None => Value::Null,
         Some(DisableReason::Config) => json!("CONFIG"),
         Some(DisableReason::Dependency) => json!("DEPENDENCY"),
+        Some(DisableReason::NotSupported) => json!("NOT_SUPPORTED_LOCALLY"),
         Some(DisableReason::Unknown) => json!("UNKNOWN"),
     }
 }

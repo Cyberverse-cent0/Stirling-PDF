@@ -65,19 +65,42 @@ fn configure_linux_graphics_env() {
     // by distro build, and XWayland-first orders leave fractional
     // scaling and native input methods unreachable. `wayland,x11`
     // prefers the native backend but keeps X11 as a fallback for
-    // compositors missing the protocols GTK needs. An explicit
-    // GDK_BACKEND always wins.
-    if std::env::var_os("WAYLAND_DISPLAY").is_some()
-        && std::env::var_os("GDK_BACKEND").is_none()
-    {
+    // compositors missing the protocols GTK needs (and for stale
+    // WAYLAND_DISPLAY values whose socket is already gone). An explicit
+    // non-empty GDK_BACKEND always wins.
+    let on_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+    let gdk_backend_set = std::env::var_os("GDK_BACKEND").is_some_and(|v| !v.is_empty());
+    if on_wayland && !gdk_backend_set {
         std::env::set_var("GDK_BACKEND", "wayland,x11");
     }
 
     // WebKitGTK's DMA-BUF renderer crashes the web process on NVIDIA and some
-    // Wayland stacks (blank window, app dying on tool switch). Opt out unless overridden.
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+    // Wayland stacks (blank window, app dying on tool switch). Opt out unless
+    // overridden — an empty value counts as unset, a real value (e.g. "0"
+    // to re-enable) is respected.
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").map_or(true, |v| v.is_empty()) {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
+
+    // On Wayland+NVIDIA the DMA-BUF opt-out is not always enough — some
+    // driver/compositor combinations still need WebKitGTK's accelerated
+    // compositor off. Enable it only there; X11 and non-NVIDIA hosts keep
+    // the GPU path (hybrid-graphics laptops with the module loaded pay a
+    // small compositing cost). An explicit value always wins.
+    if on_wayland
+        && nvidia_kernel_driver_loaded()
+        && std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").map_or(true, |v| v.is_empty())
+    {
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+    }
+}
+
+/// Whether the NVIDIA kernel module is loaded — `/proc/driver/nvidia`
+/// only exists while it is. Reading procfs beats shelling out to
+/// `nvidia-smi`, which is absent on driver-less or containerised hosts.
+#[cfg(target_os = "linux")]
+fn nvidia_kernel_driver_loaded() -> bool {
+    std::path::Path::new("/proc/driver/nvidia").is_dir()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

@@ -133,23 +133,31 @@ change-permissions, automate. The frontend decomposes these into routed
 calls (e.g. extract-pages → split-pages machinery) or marks them
 link-only.
 
-## Recommended Phase B mechanism
+## Phase B mechanism — implemented
 
-`STIRLING_PDF_TAURI_MODE=true` + `JAVA_BACKEND_URL=off` is already set
-by the sidecar. Two options for hiding ABSENT endpoints in the UI:
+The Java proxy is gone entirely (`handlers/proxy.rs` deleted; the
+fallback 404s every unrouted `/api/**`), so unrouted endpoints are dead
+on **every** `stirling-server` deployment — the disable is unconditional,
+not desktop-gated.
 
-1. **Config-level (preferred)**: extend `endpointconfig` with a
-   `desktop`/`tauri` profile that reports the crypto family +
-   proprietary/AI groups as disabled through the existing
-   `/api/v1/config/endpoints-availability` + `endpoint-enabled`
-   endpoints the frontend already polls. Data-driven, testable, and the
-   same surface Java's `EndpointInterceptor` uses.
-2. **Env-level (zero code)**: `RUST_DISABLED_ENDPOINTS` already exists —
-   the sidecar could export the crypto paths. Downside: hardcodes the
-   list in the Tauri shell and bypasses the group mechanism.
+- `endpointconfig::UNSUPPORTED_ENDPOINTS` lists the keys Java implements
+  but Rust has no route for (crypto family + proprietary/AI surface);
+  they are disabled with a new `DisableReason::NotSupported`.
+- `reason_value` serializes it as the frontend's existing
+  `NOT_SUPPORTED_LOCALLY`, which `endpointAvailability.ts` already
+  renders.
+- `endpoint_availability`/`is_endpoint_enabled` now translate
+  `/api/v1/...` paths to endpoint keys, so path-spelling callers get the
+  same answer as key-spelling ones.
+- Deliberately **not** disabled: group-table keys with no Java controller
+  (`extract-pages`, `compare`, `multi-tool`, `adjust-contrast`,
+  `automate`, `pipeline`, `change-permissions`, `remove-annotations`,
+  `pdf-to-json`, `json-to-pdf`, `pdf-to-rtf`, `pdf-to-video`, `sign`) —
+  several are frontend-composed tools that decompose into routed calls,
+  and Java reports them enabled too (parity).
 
-Option 1 keeps desktop behaviour data-driven and consistent with how
-engine-absence is already reported.
+Engine-gated endpoints need no listing here: `ENGINE_PROBES` already
+disables each tool group when its binary is absent.
 
 ## Phase C/D notes
 
@@ -158,9 +166,44 @@ engine-absence is already reported.
 - Installer win: removing `libs/*.jar` + `runtime/jre/**` from
   `tauri.conf.json` resources and dropping `BackendKind::Java` once the
   Rust path is proven on all three desktop OSes.
-- Open question for Phase C: whether `weasyprint`/`soffice`/
-  `ebook-convert` ship at all — they dominate installer size; the
-  endpointconfig groups can mark them unavailable on desktop.
 - `pdf/html` has a real decision: Rust uses `pdftohtml` only, while
   Java's alternative was LibreOffice. Bundling `pdftohtml` (small)
   covers it.
+
+### Phase C — recommended per-platform engine set
+
+Tier 1 — bundle everywhere (small, high-value):
+`gs`, `qpdf`, `pdftohtml`, `rsvg-convert` (or `inkscape` fallback),
+`unrar`/`unar`/`bsdtar`/`7z` + `rar`. Covers pdf→img/vector/pdfa/epub,
+compress/repair, pdf→html, svg→pdf, cbr/cbz both ways, redact
+`convertPDFToImage`, flatten, remove-blanks, extract-image-scans.
+
+Tier 2 — bundle if size permits: `tesseract` + `ocrmypdf` + traineddata
+(~50 MB) for ocr-pdf/auto-rotate; `verapdf` for pdfa validation.
+
+Tier 3 — do not bundle (each dominates installer size for narrow
+coverage): `weasyprint` (html/url/markdown/eml→pdf — Python+GTK),
+`soffice`/`unoconvert` (file→pdf, pdf→word/presentation/xml/rtf —
+~400 MB LibreOffice), `ebook-convert` (ebook↔epub — Calibre).
+These groups stay disabled on desktop; the endpoints report
+`DEPENDENCY`-disabled through the same availability surface, so the UI
+hides them consistently.
+
+Phase D prerequisite: a real `tauri build` on each OS — `cargo check`
+does not exercise `externalBin` resource resolution or the
+`binaries/stirling-server-<triple>` staging path.
+
+## Addendum — engine resolution for bundled desktop installs
+
+`convert::find_executable` now searches, after per-spec `path_dirs` and
+before `PATH`: `STIRLING_ENGINES_DIR` (path-separated) then
+`<dir-of-stirling-server>/engines/`. The Tauri sidecar exports
+`STIRLING_ENGINES_DIR=<resource_dir>/engines`, so installers can drop the
+tier-1 binaries into a resources `engines/` folder without touching
+`PATH`. All `Command::new` engine call sites that bypassed `EngineSpec`
+(`misc.rs` gs/qpdf helpers, `automation.rs` repair, `BlankRasterizer`)
+now resolve through `convert::resolve`, which honours the same search
+order and passes qualified `customPaths` entries through untouched.
+Group probes (`ENGINE_PROBES`, `engine_available`) inherit the bundled
+dirs for free, so a bundled `gs` enables its groups exactly like a
+system-installed one.

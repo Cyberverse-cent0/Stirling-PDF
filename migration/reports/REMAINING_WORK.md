@@ -163,10 +163,12 @@ group-enable 403 (`endpointconfig`/`guard` already model this).
   `ammonia` with an OWASP-policy-shaped allowlist, not
   java-html-sanitizer.
 - [x] `/convert/pdf/csv` — routed (`convert::pdf_to_csv`); `src/tabula.rs`
-  ports Tabula ruling/region detection on `text.rs` positioned runs.
-  Pure Rust, no engine, no group gate.
+  ports Tabula ruling/region detection on `text.rs` positioned runs,
+  plus a borderless text-edge pass (persistent x-gutters across aligned
+  lines) for tables without rulings. Pure Rust, no engine, no group gate.
 - [x] `/convert/pdf/xlsx` — routed (`convert::pdf_to_xlsx`); same
-  `tabula.rs` extractor, workbook written natively (`xlsx_workbook`,
+  `tabula.rs` extractor (ruled + borderless), workbook written
+  natively (`xlsx_workbook`,
   no `rust_xlsxwriter` dependency). `useStirlingOfficeConvert` /
   `system.stirlingOfficeConversion` → 400 — the Office-Convert branch
   is not ported and does not proxy to Java.

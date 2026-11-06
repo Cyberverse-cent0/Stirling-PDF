@@ -851,9 +851,11 @@ pub fn is_group_enabled(group: &str) -> bool {
 }
 
 /// `EndpointConfiguration.isEndpointEnabled` for a bare endpoint key (the
-/// `/api/v1/config/endpoint-enabled` family passes keys, not URIs).
+/// `/api/v1/config/endpoint-enabled` family passes keys, not URIs). Full
+/// `/api/v1/...` paths are translated first — desktop callers occasionally
+/// hand paths where keys are expected.
 pub fn is_endpoint_enabled(endpoint: &str) -> bool {
-    config().is_enabled(endpoint)
+    config().is_enabled(&lookup_key(endpoint))
 }
 
 /// `EndpointConfiguration.getAllEndpoints` — every endpoint key in any
@@ -887,10 +889,17 @@ pub fn disabled_endpoint_statuses() -> Vec<(String, bool)> {
 /// the reason Java reports when disabled (`null` reason when enabled).
 pub fn endpoint_availability(endpoint: &str) -> (bool, Option<DisableReason>) {
     let cfg = config();
-    if cfg.is_enabled(endpoint) {
+    let key = lookup_key(endpoint);
+    if cfg.is_enabled(&key) {
         return (true, None);
     }
-    (false, Some(cfg.disable_reason(endpoint)))
+    (false, Some(cfg.disable_reason(&key)))
+}
+
+/// Bare keys pass through; `/api/v1/...` paths resolve to their endpoint
+/// key so availability checks behave identically either way.
+fn lookup_key(raw: &str) -> String {
+    endpoint_key_for_uri(raw).unwrap_or_else(|| raw.trim_start_matches('/').to_string())
 }
 
 #[cfg(test)]
@@ -906,9 +915,9 @@ mod tests {
 
         // Ordinary migrated endpoints stay enabled.
         assert!(is_endpoint_enabled_for_uri("/api/v1/general/merge-pdfs"));
-       
+
         assert!(is_endpoint_enabled_for_uri("/api/v1/analysis/page-count"));
-       
+
         assert!(is_endpoint_enabled_for_uri("/api/v1/security/sanitize-pdf"));
 
         // Built-in dependency rules: no PDF/UA tagger, no form-detection
@@ -942,14 +951,6 @@ mod tests {
         assert_eq!(first_version("no digits here"), None);
     }
 
-
-
-
-
-
-
-
-
     #[test]
     fn version_compare_treats_missing_components_as_zero() {
         assert!(version_lt("57.9", "58.0"));
@@ -979,16 +980,41 @@ mod tests {
         assert_eq!(endpoint_key_for_uri("/health"), None);
         assert_eq!(endpoint_key_for_uri("/api/v1"), None);
     }
+
+    /// Endpoints Java implements but Rust has no route for report
+    /// unavailable with `NotSupported`, whether queried by key or path —
+    /// with no Java proxy they can never succeed.
+    #[test]
+    fn unrouted_endpoints_report_not_supported() {
+        init(&Settings::default());
+        for key in [
+            "cert-sign",
+            "timestamp-pdf",
+            "validate-signature",
+            "verify-pdf",
+            "validate-compliance",
+            "ingest",
+            "restore-pdf-protection",
+        ] {
+            let (enabled, reason) = endpoint_availability(key);
+            assert!(!enabled, "{key} should be disabled");
+            assert_eq!(reason, Some(DisableReason::NotSupported), "{key}");
+        }
+        // Path spellings resolve to the same key.
+        let (enabled, reason) = endpoint_availability("/api/v1/security/cert-sign");
+        assert!(!enabled);
+        assert_eq!(reason, Some(DisableReason::NotSupported));
+        // Hardware-signing subpaths collapse to the `cert-sign` key.
+        assert!(!is_endpoint_enabled("/api/v1/security/cert-sign/sessions"));
+        // Routed endpoints and frontend-composed keys stay enabled.
+        for key in [
+            "merge-pdfs",
+            "ocr-pdf",
+            "extract-pages",
+            "compare",
+            "pipeline",
+        ] {
+            assert!(is_endpoint_enabled(key), "{key} should stay enabled");
+        }
+    }
 }
-
-
-
-
-
-
-
-
-
-
-
-

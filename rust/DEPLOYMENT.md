@@ -30,7 +30,13 @@ pdf-to-video over CVEs).
 - `system.customPaths.operations.*` in `configs/settings.yml` overrides
   the binary path for `weasyprint`, `unoconvert`, `calibre`
   (`ebook-convert` resolves through it), `ocrmypdf` and `soffice`; blank
-  means the bare `PATH` name. Other engines always probe `PATH`.
+  means the bare command name. Other engines have no per-engine override.
+- Engine lookup order for every probe and spawn: `customPaths` path →
+  per-call `path_dirs` → `STIRLING_ENGINES_DIR` (path-separated list) →
+  `<dir-of-stirling-server>/engines/` → `PATH`. The desktop installer
+  bundles tier-1 engines under the app's `engines/` resource dir and the
+  Tauri shell exports it as `STIRLING_ENGINES_DIR`; `<exe>/engines` is
+  the fallback convention for manually staged layouts.
 - `system.enableUrlToPDF` must be `true` for url-to-pdf (default off,
   matching Java).
 - `endpoints.toRemove` / `endpoints.groupsToRemove` disable endpoints or

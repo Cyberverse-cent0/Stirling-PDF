@@ -558,6 +558,16 @@ fn run_stirling_server(app: &tauri::AppHandle, server_path: &Path) -> Result<(),
     sweep_stale_shutdown_files(&work_dir, &shutdown_file);
     *BACKEND_SHUTDOWN_FILE.lock().unwrap() = Some(shutdown_file.clone());
 
+    // Engines bundled as installer resources live in `<resource>/engines`;
+    // the Rust side searches that dir (and PATH) for gs/qpdf/etc. An empty
+    // value simply contributes no directory.
+    let engines_dir = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|dir| dir.join("engines").display().to_string())
+        .unwrap_or_default();
+
     let sidecar_command = app
         .shell()
         .command(server_path.to_str().unwrap())
@@ -570,6 +580,7 @@ fn run_stirling_server(app: &tauri::AppHandle, server_path: &Path) -> Result<(),
         // endpoints must fail fast rather than proxy into the void.
         .env("JAVA_BACKEND_URL", "off")
         .env("STIRLING_BASE_PATH", app_data_dir.to_str().unwrap())
+        .env("STIRLING_ENGINES_DIR", engines_dir)
         .env(
             "STIRLING_PDF_SHUTDOWN_FILE",
             shutdown_file.to_str().unwrap(),

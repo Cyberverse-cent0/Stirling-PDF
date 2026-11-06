@@ -439,12 +439,14 @@ fn repair(
 
     // `gs -o out -sDEVICE=pdfwrite in`, exactly RepairController's invocation.
     if gs_enabled {
-        match std::process::Command::new("gs")
-            .arg("-o")
-            .arg(&output_path)
-            .arg("-sDEVICE=pdfwrite")
-            .arg(&input_path)
-            .output()
+        match std::process::Command::new(crate::convert::resolve(&crate::settings::engine_program(
+            "gs",
+        )))
+        .arg("-o")
+        .arg(&output_path)
+        .arg("-sDEVICE=pdfwrite")
+        .arg(&input_path)
+        .output()
         {
             Ok(output) => {
                 if output.status.success() {
@@ -462,12 +464,14 @@ fn repair(
         // `qpdf --qdf --object-streams=disable in out`; exit 3 means qpdf
         // recovered with warnings, which still produces a repaired file.
         let _ = std::fs::remove_file(&output_path);
-        match std::process::Command::new("qpdf")
-            .arg("--qdf")
-            .arg("--object-streams=disable")
-            .arg(&input_path)
-            .arg(&output_path)
-            .output()
+        match std::process::Command::new(crate::convert::resolve(&crate::settings::engine_program(
+            "qpdf",
+        )))
+        .arg("--qdf")
+        .arg("--object-streams=disable")
+        .arg(&input_path)
+        .arg(&output_path)
+        .output()
         {
             Ok(output) => {
                 let code = output.status.code().unwrap_or(-1);
