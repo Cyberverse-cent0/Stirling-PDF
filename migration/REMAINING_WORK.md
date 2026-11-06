@@ -205,9 +205,12 @@ now `pub(crate)` and shared) vs documented non-port.
 - [x] `extract-image-scans` — routed (`handlers::image_scans` +
   `image_split`): native Rust port of `split_photos.py` — no Python/cv2
   dependency (endpoint dropped from the `Python`/`OpenCV` groups).
-  PDF pages render at 300 DPI via `BlankRasterizer` (Ghostscript);
-  image inputs decode via the `image` crate (jpeg/png/gif/bmp/webp/
-  tiff/pnm/hdr). Zip or single-PNG naming matches Java. Script quirk
+  PDF pages render at `min(300, system.maxDPI)` via `BlankRasterizer`
+  (Ghostscript), pages rasterising and splitting concurrently on scoped
+  threads with page order preserved. Image inputs decode via the
+  `image` crate (jpeg/png/gif/bmp/webp/tiff/pnm/hdr/tga/dds/exr/ico/
+  qoi/ff — heic/avif/jp2 remain gaps vs cv2's imread). Zip or
+  single-PNG naming matches Java. Script quirk
   preserved: `minArea`/`minContourArea` params are parsed but ignored —
   `split_photos.py` never forwarded them, so its 10000/500 defaults
   always applied.

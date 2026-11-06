@@ -472,6 +472,9 @@ impl EndpointConfig {
         config.disable_endpoint("pdf-to-ua", DisableReason::Dependency);
         config.disable_endpoint("accessibility-report", DisableReason::Dependency);
         config.disable_endpoint("form-detection", DisableReason::Dependency);
+        for endpoint in UNSUPPORTED_ENDPOINTS {
+            config.disable_endpoint(endpoint, DisableReason::NotSupported);
+        }
         if !settings.system.enable_url_to_pdf {
             config.disable_endpoint("url-to-pdf", DisableReason::Config);
         }
@@ -903,7 +906,9 @@ mod tests {
 
         // Ordinary migrated endpoints stay enabled.
         assert!(is_endpoint_enabled_for_uri("/api/v1/general/merge-pdfs"));
+       
         assert!(is_endpoint_enabled_for_uri("/api/v1/analysis/page-count"));
+       
         assert!(is_endpoint_enabled_for_uri("/api/v1/security/sanitize-pdf"));
 
         // Built-in dependency rules: no PDF/UA tagger, no form-detection
@@ -937,6 +942,14 @@ mod tests {
         assert_eq!(first_version("no digits here"), None);
     }
 
+
+
+
+
+
+
+
+
     #[test]
     fn version_compare_treats_missing_components_as_zero() {
         assert!(version_lt("57.9", "58.0"));
@@ -967,3 +980,15 @@ mod tests {
         assert_eq!(endpoint_key_for_uri("/api/v1"), None);
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
