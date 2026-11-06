@@ -7,3 +7,4 @@ target/
 /runtime/
 
 **/stirling_thumbnail_handler.dll
+/node_modules

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
+use crate::agents::output_mode::structured_output_retries;
 use crate::contracts::document_classifier::{
     ClassifyDocumentRequest, DocumentClassificationResponse, LabelOption,
 };
@@ -19,11 +20,6 @@ const MAX_ASSIGNED_LABELS: usize = 5;
 /// Pages read from each end of the document — enough to identify the type at
 /// flat cost regardless of length.
 const WINDOW_PAGES: usize = 2;
-/// pydantic-ai `output_retries`: native structured output gets 1 retry,
-/// tool-delivered output (ollama/custom providers) gets 6.
-const NATIVE_RETRIES: usize = 1;
-const TOOL_RETRIES: usize = 6;
-
 const SYSTEM_PROMPT: &str =
     "You identify what a document is by assigning labels, choosing only from a \
 fixed list of allowed labels you are given.\n\n\
@@ -47,10 +43,6 @@ const OUTPUT_SCHEMA: &str = r#"{
   "required": ["labels"],
   "additionalProperties": false
 }"#;
-
-fn uses_tool_output(chat_provider: &str) -> bool {
-    matches!(chat_provider, "ollama" | "custom")
-}
 
 fn render_labels(labels: &[LabelOption]) -> String {
     let names: Vec<&str> = labels.iter().map(|l| l.name.as_str()).collect();
@@ -148,11 +140,7 @@ pub async fn classify(
 
     let schema: Value = serde_json::from_str(OUTPUT_SCHEMA)
         .map_err(|e| ApiError::internal(format!("classifier schema: {e}")))?;
-    let retries = if uses_tool_output(chat_provider) {
-        TOOL_RETRIES
-    } else {
-        NATIVE_RETRIES
-    };
+    let retries = structured_output_retries(chat_provider);
     let output = client
         .complete_json(SYSTEM_PROMPT, &prompt, &schema, retries)
         .await

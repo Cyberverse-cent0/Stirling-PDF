@@ -1,0 +1,7 @@
+# Applies to every crate under rust/ (stirling-server and engine).
+# `target-cpu=native` tunes codegen for the build host — release binaries
+# are no longer portable to other CPUs; drop the flag for distributed builds.
+# `-fuse-ld=lld` resolves through the `ld.lld` shim rustc places in the
+# toolchain's gcc-ld dir, so no system lld install is needed.
+[build]
+rustflags = ["-C", "target-cpu=native", "-C", "link-arg=-fuse-ld=lld"]

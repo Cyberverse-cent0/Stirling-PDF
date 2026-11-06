@@ -38,7 +38,7 @@
   "[yaml]": {
     "editor.defaultFormatter": "redhat.vscode-yaml"
   },
-  "java.compile.nullAnalysis.mode": "automatic",
+  "java.compile.nullAnalysis.mode": "disabled",
   "java.configuration.updateBuildConfiguration": "interactive",
   "java.format.enabled": true,
   "java.format.settings.profile": "GoogleStyle",
@@ -124,7 +124,7 @@
     "CLAUDE.md",
     "configs/",
     "customFiles/",
-    "docker/",
+    "runtime/docker/",
     "docs/",
     "engine/",
     "exampleYmlFiles/",

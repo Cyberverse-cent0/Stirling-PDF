@@ -32,12 +32,18 @@ pub struct ToolContext {
     pub data: Value,
 }
 
+#[derive(Clone)]
 pub struct AgentTool {
     pub name: String,
     pub description: String,
     /// JSON Schema for the tool arguments.
     pub parameters: Value,
     pub handler: ToolHandler,
+    /// Dynamic visibility — the Python `prepare` hook that returns `None` to
+    /// hide a tool (e.g. once a per-run budget is spent). Evaluated before
+    /// every model round trip; hidden tools are neither advertised nor
+    /// dispatchable.
+    pub visible: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl AgentTool {
@@ -51,7 +57,14 @@ impl AgentTool {
             description: description.to_string(),
             parameters,
             handler: Arc::new(move |args, ctx| Box::pin(handler(args.clone(), ctx))),
+            visible: None,
         }
+    }
+
+    /// Hide the tool from the model once `f` returns false (budget spent).
+    pub fn visible(mut self, f: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        self.visible = Some(Arc::new(f));
+        self
     }
 }
 
@@ -86,6 +99,8 @@ pub enum AgentError {
     IterationLimit(usize),
     #[error("tool {0} returned an error: {1}")]
     Tool(String, String),
+    #[error("agent output failed validation: {0}")]
+    Output(String),
 }
 
 pub struct AgentRun<'a> {
@@ -109,11 +124,19 @@ pub async fn run_agent(run: AgentRun<'_>) -> Result<AgentOutput, AgentError> {
     };
 
     for _ in 0..limit {
+        // Re-evaluate visibility each round so budget-bound tools disappear
+        // mid-run, matching pydantic-ai's per-call `prepare` hooks.
+        let tools: Vec<AgentTool> = run
+            .tools
+            .iter()
+            .filter(|t| t.visible.as_ref().is_none_or(|f| f()))
+            .cloned()
+            .collect();
         let response = chat_once(
             run.client,
             run.system,
             &messages,
-            &run.tools,
+            &tools,
             run.output_schema.as_ref(),
         )
         .await?;
@@ -139,7 +162,7 @@ pub async fn run_agent(run: AgentRun<'_>) -> Result<AgentOutput, AgentError> {
             if run.output_schema.is_some() && call.name == "final_result" {
                 return Ok(AgentOutput::Json(call.arguments.clone()));
             }
-            let tool = run.tools.iter().find(|t| t.name == call.name);
+            let tool = tools.iter().find(|t| t.name == call.name);
             let content = match tool {
                 Some(tool) => {
                     match (tool.handler)(call.arguments.clone(), &ToolContext::default()).await {

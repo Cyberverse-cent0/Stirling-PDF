@@ -8,7 +8,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lopdf::{decode_text_string, Dictionary, Document, Object, ObjectId, SaveOptions, Stream};
+use lopdf::{
+    decode_text_string, Dictionary, Document, LoadOptions, Object, ObjectId, ObjectStream,
+    SaveOptions, Stream, StringFormat,
+};
 
 use crate::error::{AppError, AppResult};
 
@@ -22,10 +25,47 @@ fn pdf_err(e: lopdf::Error) -> AppError {
 pub fn load(name: &str, bytes: &[u8]) -> AppResult<Document> {
     let doc =
         Document::load_mem(bytes).map_err(|e| AppError::BadRequest(format!("{name}: {e}")))?;
+    finish_load(name, doc)
+}
+
+/// Password-protected variant for the security endpoints: the caller
+/// supplies the opening credential. A wrong password fails inside
+/// `load_mem_with_password`; the still-encrypted check below catches a
+/// document that loaded without decrypting.
+pub fn load_with_password(name: &str, bytes: &[u8], password: &str) -> AppResult<Document> {
+    let doc = Document::load_mem_with_options(bytes, LoadOptions::with_password(password))
+        .map_err(|e| AppError::BadRequest(format!("{name}: {e}")))?;
+    finish_load(name, doc)
+}
+
+fn finish_load(name: &str, mut doc: Document) -> AppResult<Document> {
     if doc.trailer.has(b"Encrypt") && !doc.was_encrypted() {
         return Err(AppError::BadRequest(format!(
             "{name}: password required or incorrect password"
         )));
+    }
+    // lopdf expands /ObjStm contents only on the decrypt path, so an
+    // unencrypted file keeps its page tree inside object streams and
+    // looks page-less. Expand them the same way lopdf does after
+    // decryption; `or_insert` never clobbers a real object.
+    let mut pending = Vec::new();
+    for object in doc.objects.values() {
+        let Ok(stream) = object.as_stream() else {
+            continue;
+        };
+        // Real-world files carry `/Type` misspelled (`/Txpe`); `/N` +
+        // `/First` are the structural markers PDFBox keys object streams on.
+        let is_objstm = stream.dict.has_type(b"ObjStm")
+            || (stream.dict.get(b"N").is_ok() && stream.dict.get(b"First").is_ok());
+        if !is_objstm {
+            continue;
+        }
+        if let Ok(obj_stream) = ObjectStream::new_with_limit(stream, Some(64 * 1024 * 1024)) {
+            pending.extend(obj_stream.objects);
+        }
+    }
+    for (id, entry) in pending {
+        doc.objects.entry(id).or_insert(entry);
     }
     Ok(doc)
 }
@@ -494,19 +534,22 @@ pub fn annotation_subtype(annot: &Dictionary) -> String {
 /// Divergence: unlike the renderer-backed version this lists fonts the page
 /// declares, including ones no text object uses, and does not descend into
 /// form XObjects.
+/// Font resource names (`F1`, `F40`, …) — the keys of `/Resources/Font`,
+/// matching Java's `PDResources.getFontNames()`.
+///
+/// Divergence: unlike the renderer-backed version this lists fonts the page
+/// declares, including ones no text object uses, and does not descend into
+/// form XObjects.
 pub fn page_fonts(doc: &Document, page_id: ObjectId) -> AppResult<Vec<String>> {
     let fonts = doc.get_page_fonts(page_id).map_err(pdf_err)?;
-    let mut names = Vec::with_capacity(fonts.len());
-    for (_, font) in fonts {
-        if let Ok(name) = font.get(b"BaseFont").and_then(|o| o.as_name()) {
-            names.push(String::from_utf8_lossy(name).into_owned());
-        }
-    }
-    Ok(names)
+    Ok(fonts
+        .keys()
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .collect())
 }
 
 /// The catalog's AcroForm dictionary, if any.
-fn acroform(doc: &Document) -> Option<Dictionary> {
+pub(crate) fn acroform(doc: &Document) -> Option<Dictionary> {
     let catalog = doc.catalog().ok()?;
     let (_, object) = doc.dereference(catalog.get(b"AcroForm").ok()?).ok()?;
     match object {
@@ -573,6 +616,79 @@ fn signature_in_field(
                     return Ok(true);
                 }
             }
+        }
+    }
+    Ok(false)
+}
+
+/// Whether any AcroForm signature field carries a `/V` signature
+/// dictionary — the `PDDocument.getSignatureDictionaries()` check the
+/// password endpoints use to refuse protection changes on signed files.
+pub fn signature_dict_exists(doc: &Document) -> AppResult<bool> {
+    let mut visited = HashSet::new();
+    let Some(form) = acroform(doc) else {
+        return Ok(false);
+    };
+    let Ok(fields) = form.get(b"Fields") else {
+        return Ok(false);
+    };
+    let (_, resolved) = doc.dereference(fields).map_err(pdf_err)?;
+    let Object::Array(items) = resolved else {
+        return Ok(false);
+    };
+    for item in items {
+        if signature_value_in_field(doc, item, &mut visited, 0)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn signature_value_in_field(
+    doc: &Document,
+    object: &Object,
+    visited: &mut HashSet<ObjectId>,
+    depth: usize,
+) -> AppResult<bool> {
+    if depth > 100 {
+        return Ok(false);
+    }
+    let Some(dict) = dict_owned(doc, object)? else {
+        return Ok(false);
+    };
+    let is_sig = dict
+        .get(b"FT")
+        .ok()
+        .and_then(|o| doc.dereference(o).ok())
+        .and_then(|(_, o)| o.as_name().ok())
+        .is_some_and(|n| n == b"Sig");
+    if is_sig
+        && dict
+            .get(b"V")
+            .ok()
+            .and_then(|v| doc.dereference(v).ok())
+            .is_some_and(|(_, o)| matches!(o, Object::Dictionary(_)))
+    {
+        return Ok(true);
+    }
+    let Some(id) = object.as_reference().ok() else {
+        return Ok(false);
+    };
+    if !visited.insert(id) {
+        return Ok(false);
+    }
+    let Ok(kids) = dict.get(b"Kids") else {
+        return Ok(false);
+    };
+    let Ok((_, resolved)) = doc.dereference(kids) else {
+        return Ok(false);
+    };
+    let Object::Array(items) = resolved else {
+        return Ok(false);
+    };
+    for kid in items {
+        if signature_value_in_field(doc, kid, visited, depth + 1)? {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -777,7 +893,7 @@ fn set_page_content(doc: &mut Document, page_id: ObjectId, content: Vec<u8>) -> 
     Ok(())
 }
 
-fn pdf_num(value: f64) -> String {
+pub(crate) fn pdf_num(value: f64) -> String {
     if value.fract() == 0.0 {
         format!("{}", value as i64)
     } else {
@@ -889,15 +1005,15 @@ fn rects_intersect(a: [f64; 4], b: [f64; 4]) -> bool {
     ax1 >= bx0 && ax0 <= bx1 && ay1 >= by0 && ay0 <= by1
 }
 
-fn kept_annotation(object: &Object, dict: &Dictionary) -> bool {
-    matches!(
-        dict.get(b"Subtype")
-            .ok()
-            .and_then(|o| o.as_name().ok())
-            .map(<[u8]>::to_vec)
-            .as_deref(),
-        Some(b"Link") | Some(b"Widget")
-    ) && !matches!(object, Object::Null)
+fn kept_annotation(object: &Object, dict: &Dictionary, keep_stamp: bool) -> bool {
+    let subtype = dict
+        .get(b"Subtype")
+        .ok()
+        .and_then(|o| o.as_name().ok())
+        .map(<[u8]>::to_vec);
+    let kept = matches!(subtype.as_deref(), Some(b"Link") | Some(b"Widget"))
+        || (keep_stamp && matches!(subtype.as_deref(), Some(b"Stamp")));
+    kept && !matches!(object, Object::Null)
 }
 
 fn rebuild_annots(
@@ -905,6 +1021,7 @@ fn rebuild_annots(
     page_id: ObjectId,
     matrix: Option<[f64; 6]>,
     clip: Option<[f64; 4]>,
+    keep_stamp: bool,
 ) -> AppResult<()> {
     let annots = {
         let page = doc.get_dictionary(page_id).map_err(pdf_err)?;
@@ -925,7 +1042,7 @@ fn rebuild_annots(
         let Some(dict) = peek_dict(doc, &item) else {
             continue;
         };
-        if !kept_annotation(&item, dict) {
+        if !kept_annotation(&item, dict, keep_stamp) {
             continue;
         }
         let rect = annot_rect(doc, &item);
@@ -976,16 +1093,19 @@ fn rebuild_annots(
 }
 
 /// Keeps link/widget annotations on a scaled page and moves their `/Rect`
-/// by the same matrix applied to the page content.
+/// by the same matrix applied to the page content. `Stamp` annotations
+/// are kept too: `ScalePagesController` flattens their appearance streams
+/// into the content for the same reason — the scaled `/Rect` makes the
+/// viewer scale the appearance the same way.
 pub fn scale_annots(doc: &mut Document, page_id: ObjectId, matrix: [f64; 6]) -> AppResult<()> {
-    rebuild_annots(doc, page_id, Some(matrix), None)
+    rebuild_annots(doc, page_id, Some(matrix), None, true)
 }
 
 /// Keeps link/widget annotations that intersect `crop` on a cropped page.
 /// Annotation rectangles stay in page user space, matching the unchanged
 /// content coordinates.
 pub fn clip_annots(doc: &mut Document, page_id: ObjectId, crop: [f64; 4]) -> AppResult<()> {
-    rebuild_annots(doc, page_id, None, Some(crop))
+    rebuild_annots(doc, page_id, None, Some(crop), false)
 }
 
 /// Resolves a named destination through the catalog's `/Dests` dictionary
@@ -1423,6 +1543,218 @@ fn field_value(doc: &Document, object: &Object) -> Option<String> {
     }
 }
 
+/// Port of `FormUtils.pruneOrphanedFormFields`: drops AcroForm fields whose
+/// widgets no longer appear on any page (e.g. after pages were removed or
+/// split away), pruning emptied non-terminal subtrees, and removes
+/// `/AcroForm` entirely when no fields remain. Called by the Java
+/// remove-pages, split-pages, split-by-size-or-count and
+/// split-pdf-by-chapters endpoints after their page selection.
+pub fn prune_orphaned_form_fields(doc: &mut Document) -> AppResult<()> {
+    let catalog = doc.catalog().map_err(pdf_err)?;
+    let Some(acro_slot) = catalog.get(b"AcroForm").ok().cloned() else {
+        return Ok(());
+    };
+    let Some(acro_dict) = dict_owned(doc, &acro_slot)? else {
+        return Ok(());
+    };
+    let Ok(fields_obj) = acro_dict.get(b"Fields") else {
+        return Ok(());
+    };
+    let fields = match doc.dereference(fields_obj).map_err(pdf_err)? {
+        (_, Object::Array(items)) => items.clone(),
+        _ => return Ok(()),
+    };
+    if fields.is_empty() {
+        return Ok(());
+    }
+
+    let live = live_widget_ids(doc);
+    let mut visited = HashSet::new();
+    let mut kept = Vec::with_capacity(fields.len());
+    for field in fields {
+        if let Some(node) = prune_field_node(doc, field, &live, &mut visited)? {
+            kept.push(node);
+        }
+    }
+
+    if kept.is_empty() {
+        if let Ok(catalog) = doc.catalog_mut() {
+            catalog.remove(b"AcroForm");
+        }
+        return Ok(());
+    }
+
+    let mut acro_dict = acro_dict;
+    acro_dict.set("Fields", Object::Array(kept));
+    match acro_slot {
+        Object::Reference(id) => {
+            doc.objects.insert(id, Object::Dictionary(acro_dict));
+        }
+        _ => {
+            if let Ok(catalog) = doc.catalog_mut() {
+                catalog.set("AcroForm", Object::Dictionary(acro_dict));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Object ids of widget annotations still reachable from a page's
+/// `/Annots` — the live set field widgets are checked against. Direct
+/// (non-indirect) annots have no stable identity and are skipped; a field
+/// can only reference its widgets indirectly anyway.
+fn live_widget_ids(doc: &Document) -> HashSet<ObjectId> {
+    let mut live = HashSet::new();
+    for page_id in page_ids(doc) {
+        let Ok(page) = doc.get_dictionary(page_id) else {
+            continue;
+        };
+        let Ok(annots) = page.get(b"Annots") else {
+            continue;
+        };
+        let Ok((_, resolved)) = doc.dereference(annots) else {
+            continue;
+        };
+        let Object::Array(items) = resolved else {
+            continue;
+        };
+        for item in items {
+            let Ok(id) = item.as_reference() else {
+                continue;
+            };
+            let is_widget = doc
+                .get_object(id)
+                .ok()
+                .and_then(dict_of)
+                .and_then(|d| d.get(b"Subtype").ok())
+                .and_then(|s| s.as_name().ok())
+                == Some(b"Widget");
+            if is_widget {
+                live.insert(id);
+            }
+        }
+    }
+    live
+}
+
+/// Whether a `/Kids` entry is a bare widget annotation rather than a field
+/// node: `/Subtype /Widget` with no `/FT` or `/Kids` of its own.
+fn is_pure_widget(doc: &Document, kid: &Object) -> bool {
+    let resolved = match kid {
+        Object::Reference(id) => doc.get_object(*id).ok(),
+        other => Some(other),
+    };
+    resolved.and_then(dict_of).is_some_and(|d| {
+        d.get(b"Subtype").ok().and_then(|s| s.as_name().ok()) == Some(b"Widget")
+            && !d.has(b"FT")
+            && !d.has(b"Kids")
+    })
+}
+
+/// Recursive worker for [`prune_orphaned_form_fields`]. Returns the object
+/// to keep in the parent's `/Kids` or `/Fields` — the original reference
+/// for indirect fields (their dictionary was updated in place), a revised
+/// dictionary for direct ones — or `None` to drop the node.
+fn prune_field_node(
+    doc: &mut Document,
+    object: Object,
+    live: &HashSet<ObjectId>,
+    visited: &mut HashSet<ObjectId>,
+) -> AppResult<Option<Object>> {
+    let (id, dict) = match &object {
+        Object::Reference(id) => {
+            // A repeated or cyclic field reference: Java drops the copy.
+            if !visited.insert(*id) {
+                return Ok(None);
+            }
+            match doc.get_object(*id).map_err(pdf_err)?.clone() {
+                Object::Dictionary(d) => (Some(*id), d),
+                _ => return Ok(Some(object)),
+            }
+        }
+        Object::Dictionary(d) => (None, d.clone()),
+        _ => return Ok(Some(object)),
+    };
+
+    let kids: Vec<Object> = match dict.get(b"Kids") {
+        Ok(kids_obj) => match doc.dereference(kids_obj).map_err(pdf_err)? {
+            (_, Object::Array(items)) => items.clone(),
+            _ => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+    };
+
+    let had_kids = dict.has(b"Kids");
+
+    // A node is non-terminal when it has field children; a `/Kids` array of
+    // only widget annotations makes it a terminal field instead.
+    let non_terminal = kids.iter().any(|kid| !is_pure_widget(doc, kid));
+
+    // `None` leaves the node's `/Kids` untouched (merged field/widget with
+    // no kids of its own).
+    let new_kids = if non_terminal {
+        let mut kept_kids = Vec::with_capacity(kids.len());
+        for kid in kids {
+            if let Some(node) = prune_field_node(doc, kid, live, visited)? {
+                kept_kids.push(node);
+            }
+        }
+        if kept_kids.is_empty() {
+            return Ok(None);
+        }
+        Some(kept_kids)
+    } else {
+        // Terminal field: keep it only while at least one of its widgets is
+        // still on a page — itself when it is a merged field/widget, plus
+        // the `/Kids` widget annotations.
+        let self_is_live_widget = id.is_some_and(|id| {
+            live.contains(&id)
+                && dict.get(b"Subtype").ok().and_then(|s| s.as_name().ok()) == Some(b"Widget")
+        });
+        let mut live_kids = Vec::new();
+        for kid in &kids {
+            let kid_live = match kid {
+                Object::Reference(kid_id) => live.contains(kid_id),
+                _ => false,
+            };
+            if kid_live {
+                live_kids.push(kid.clone());
+            }
+        }
+        if !self_is_live_widget && live_kids.is_empty() {
+            return Ok(None);
+        }
+        had_kids.then_some(live_kids)
+    };
+
+    Ok(Some(write_back_field(doc, id, dict, new_kids)))
+}
+
+/// Writes the pruned `/Kids` list back onto a field node: indirect fields
+/// are updated in the object table, direct ones return a revised
+/// dictionary for the parent to embed. `None` leaves `/Kids` alone.
+fn write_back_field(
+    doc: &mut Document,
+    id: Option<ObjectId>,
+    mut dict: Dictionary,
+    new_kids: Option<Vec<Object>>,
+) -> Object {
+    if let Some(kids) = new_kids {
+        dict.set("Kids", Object::Array(kids));
+    }
+    match id {
+        Some(id) => {
+            if let Some(object) = doc.objects.get_mut(&id) {
+                if let Some(slot) = dict_mut(object) {
+                    *slot = dict;
+                }
+            }
+            Object::Reference(id)
+        }
+        None => Object::Dictionary(dict),
+    }
+}
+
 /// PDF date string (`D:YYYYMMDDHHmmSSOHH'mm'`) → `yyyy-MM-dd HH:mm:ss`
 /// in the system timezone, like `GetInfoOnPDF.formatDate`. A missing
 /// timezone is read as UTC, matching PDFBox's `DateConverter`. Returns
@@ -1733,7 +2065,7 @@ pub fn page_resources_holder(doc: &Document, page_id: ObjectId) -> Option<(Objec
 /// method right-multiplies, so the transform concatenated last applies to
 /// points first — the ordering `LayerUtility.importPageAsForm` relies on.
 #[derive(Clone, Copy)]
-struct Affine {
+pub(crate) struct Affine {
     m00: f64,
     m01: f64,
     m02: f64,
@@ -1743,7 +2075,7 @@ struct Affine {
 }
 
 impl Affine {
-    fn identity() -> Self {
+    pub(crate) fn identity() -> Self {
         Self {
             m00: 1.0,
             m01: 0.0,
@@ -1754,12 +2086,12 @@ impl Affine {
         }
     }
 
-    fn translate(&mut self, tx: f64, ty: f64) {
+    pub(crate) fn translate(&mut self, tx: f64, ty: f64) {
         self.m02 += self.m00 * tx + self.m01 * ty;
         self.m12 += self.m10 * tx + self.m11 * ty;
     }
 
-    fn scale(&mut self, sx: f64, sy: f64) {
+    pub(crate) fn scale(&mut self, sx: f64, sy: f64) {
         self.m00 *= sx;
         self.m01 *= sy;
         self.m10 *= sx;
@@ -1790,6 +2122,22 @@ impl Affine {
             && self.m12 == 0.0
     }
 
+    /// Right-multiplies by `rhs`: points see `rhs` first, then `self`.
+    pub(crate) fn concat(&mut self, rhs: &Affine) {
+        let (m00, m01, m10, m11) = (self.m00, self.m01, self.m10, self.m11);
+        self.m00 = m00 * rhs.m00 + m01 * rhs.m10;
+        self.m01 = m00 * rhs.m01 + m01 * rhs.m11;
+        self.m10 = m10 * rhs.m00 + m11 * rhs.m10;
+        self.m11 = m10 * rhs.m01 + m11 * rhs.m11;
+        self.m02 += m00 * rhs.m02 + m01 * rhs.m12;
+        self.m12 += m10 * rhs.m02 + m11 * rhs.m12;
+    }
+
+    /// PDF `cm` operands `[a b c d e f]` for the same point mapping.
+    pub(crate) fn pdf_cm(&self) -> [f64; 6] {
+        [self.m00, self.m10, self.m01, self.m11, self.m02, self.m12]
+    }
+
     /// PDF `/Matrix` `[a b c d e f]` for the same point mapping.
     fn pdf_array(&self) -> Object {
         Object::Array(
@@ -1804,7 +2152,7 @@ impl Affine {
 /// The `/Matrix` `LayerUtility.importPageAsForm` computes: maps source user
 /// space into the form's displayed space — origin at the view box's
 /// lower-left, y up, page rotation applied.
-fn form_matrix(media: [f64; 4], view: [f64; 4], rotation: i64) -> Affine {
+pub(crate) fn form_matrix(media: [f64; 4], view: [f64; 4], rotation: i64) -> Affine {
     let mut at = Affine::identity();
     at.translate(media[0] - view[0], media[1] - view[1]);
     let vw = view[2] - view[0];
@@ -1880,6 +2228,108 @@ fn pdf_date_now() -> String {
     )
 }
 
+fn stamp_producer_creator(info: &mut Dictionary) {
+    let label = app_version_label();
+    info.set("Producer", Object::string_literal(label.as_str()));
+    info.set("Creator", Object::string_literal(label));
+}
+
+/// The `/Info` dictionary `createNewDocumentBasedOnOldDocument` produces:
+/// only the standard text fields survive (custom keys are dropped with the
+/// old `PDDocumentInformation`), dates re-zone to the system zone like
+/// Java's `Calendar` round-trip, missing dates become now, and
+/// Producer/Creator get the app label.
+fn info_based_on(src_info: Option<Dictionary>) -> Dictionary {
+    let mut info = Dictionary::new();
+    for key in [
+        &b"Title"[..],
+        &b"Author"[..],
+        &b"Subject"[..],
+        &b"Keywords"[..],
+    ] {
+        if let Some(value) = src_info.as_ref().and_then(|d| d.get(key).ok()) {
+            info.set(key, value.clone());
+        }
+    }
+    for key in [&b"CreationDate"[..], &b"ModDate"[..]] {
+        if let Some(text) = src_info
+            .as_ref()
+            .and_then(|d| d.get(key).ok())
+            .and_then(|v| decode_text_string(v).ok())
+            .and_then(|t| pdf_date_rezone(&t))
+        {
+            info.set(key, Object::string_literal(text));
+        }
+    }
+    stamp_producer_creator(&mut info);
+    let now = pdf_date_now();
+    if !info.has(b"CreationDate") {
+        info.set("CreationDate", Object::string_literal(now.as_str()));
+    }
+    if !info.has(b"ModDate") {
+        info.set("ModDate", Object::string_literal(now.as_str()));
+    }
+    info
+}
+
+/// `createNewDocumentBasedOnOldDocument`'s `/Info` carry-over onto a fresh
+/// document.
+pub fn carry_info(src: &Document, dst: &mut Document) {
+    dst.trailer
+        .set("Info", Object::Dictionary(info_based_on(info_dict(src))));
+}
+
+/// `/Info` for a document built from scratch: app label plus both dates
+/// set to now.
+pub fn default_info(doc: &mut Document) {
+    let mut info = Dictionary::new();
+    stamp_producer_creator(&mut info);
+    let now = pdf_date_now();
+    info.set("CreationDate", Object::string_literal(now.as_str()));
+    info.set("ModDate", Object::string_literal(now.as_str()));
+    doc.trailer.set("Info", Object::Dictionary(info));
+}
+
+/// Applies [`carry_info`]'s carry-over to a document mutated in place:
+/// only the standard `/Info` fields survive, dates re-zone, Producer and
+/// Creator get the app label.
+pub fn restamp_info(doc: &mut Document) {
+    doc.trailer
+        .set("Info", Object::Dictionary(info_based_on(info_dict(doc))));
+}
+
+/// `PdfMetadataService.setDefaultMetadata` as `CustomPDFDocumentFactory`
+/// applies it to every non-read-only `load`: Producer is always the app
+/// label and ModDate re-zones to the system zone (or becomes now), while
+/// CreationDate/Creator are stamped only when the source has no parseable
+/// CreationDate — a present CreationDate and Creator survive untouched, as
+/// do all other `/Info` keys including custom ones.
+pub fn touch_loaded_info(doc: &mut Document) {
+    let mut info = info_dict(doc).unwrap_or_default();
+    let label = app_version_label();
+    info.set("Producer", Object::string_literal(label.as_str()));
+    let mod_date = info
+        .get(b"ModDate")
+        .ok()
+        .and_then(|v| decode_text_string(v).ok())
+        .and_then(|t| pdf_date_rezone(&t));
+    info.set(
+        "ModDate",
+        Object::string_literal(mod_date.unwrap_or_else(pdf_date_now).as_str()),
+    );
+    let creation = info
+        .get(b"CreationDate")
+        .ok()
+        .and_then(|v| decode_text_string(v).ok())
+        .and_then(|t| pdf_date_rezone(&t));
+    if creation.is_none() {
+        let now = pdf_date_now();
+        info.set("CreationDate", Object::string_literal(now.as_str()));
+        info.set("Creator", Object::string_literal(label.as_str()));
+    }
+    doc.trailer.set("Info", Object::Dictionary(info));
+}
+
 /// Port of `ToSinglePageController.pdfToSinglePage`: stacks every page's
 /// appearance top-to-bottom on a single page sized `max(media widths) ×
 /// sum(media heights)`. Each source page becomes a Form XObject placed by
@@ -1895,19 +2345,13 @@ pub fn to_single_page(src: &Document) -> AppResult<Document> {
     let mut max_width = 0.0f64;
     let mut boxes = Vec::with_capacity(page_ids.len());
     for &page_id in &page_ids {
-        let media = media_box(src, page_id)?;
+        // `importPageAsForm` sees `getMediaBox()`/`getCropBox()`: Letter
+        // fallback for media, crop clipped to media — `page_boxes` parity.
+        let pb = page_boxes(src, page_id)?;
+        let media = f64_box(pb.media);
         total_height += media[3] - media[1];
         max_width = max_width.max(media[2] - media[0]);
-        // PDFBox's viewBox is the raw crop box when present — no clipping
-        // to the media box, unlike `page_boxes`.
-        let view = match inherited(src, page_id, b"CropBox")? {
-            Some(object) => {
-                let (_, resolved) = src.dereference(&object).map_err(pdf_err)?;
-                box_numbers(resolved)?
-            }
-            None => media,
-        };
-        boxes.push((media, view));
+        boxes.push((media, f64_box(pb.crop)));
     }
 
     let mut dst = new_document();
@@ -1923,43 +2367,10 @@ pub fn to_single_page(src: &Document) -> AppResult<Document> {
         let media_height = media[3] - media[1];
         let rotation = page_rotation(src, page_id)?;
 
-        let page_content = src
-            .get_page_content_with_limit(page_id, 64 * 1024 * 1024)
+        src.get_page_content_with_limit(page_id, 64 * 1024 * 1024)
             .map_err(pdf_err)?;
 
-        let mut form_dict = Dictionary::new();
-        form_dict.set("Type", "XObject");
-        form_dict.set("Subtype", "Form");
-        form_dict.set(
-            "BBox",
-            Object::Array(view.iter().map(|v| Object::Real(*v as f32)).collect()),
-        );
-        let resources = match page_resources(src, page_id)? {
-            Some((_, resources)) => match copy_value(&mut dst, src, &resources, &mut map)? {
-                Object::Null => Object::Dictionary(Dictionary::new()),
-                copied => copied,
-            },
-            None => Object::Dictionary(Dictionary::new()),
-        };
-        form_dict.set("Resources", resources);
-        // importPageAsForm carries only Group/LastModified/Metadata over
-        // from the page dictionary.
-        if let Ok(page_dict) = src.get_dictionary(page_id) {
-            for key in [&b"Group"[..], &b"LastModified"[..], &b"Metadata"[..]] {
-                if let Ok(value) = page_dict.get(key) {
-                    form_dict.set(key, copy_value(&mut dst, src, value, &mut map)?);
-                }
-            }
-        }
-        let at = form_matrix(media, view, rotation);
-        if !at.is_identity() {
-            form_dict.set("Matrix", at.pdf_array());
-        }
-        let form_id = dst.new_object_id();
-        dst.objects.insert(
-            form_id,
-            Object::Stream(Stream::new(form_dict, page_content)),
-        );
+        let form_id = page_form_stream(&mut dst, src, page_id, media, view, rotation, &mut map)?;
         xobjects.set(format!("Fm{index}"), form_id);
 
         // appendFormAsLayer: OCG marked content around q/cm/Do/Q. The
@@ -2029,45 +2440,549 @@ pub fn to_single_page(src: &Document) -> AppResult<Document> {
         }
     }
 
-    // createNewDocumentBasedOnOldDocument: the standard /Info fields carry
-    // over; Producer/Creator get the app label; dates fall back to now.
-    let mut info = Dictionary::new();
-    let src_info = info_dict(src);
-    for key in [
-        &b"Title"[..],
-        &b"Author"[..],
-        &b"Subject"[..],
-        &b"Keywords"[..],
-    ] {
-        if let Some(value) = src_info.as_ref().and_then(|d| d.get(key).ok()) {
-            info.set(key, value.clone());
-        }
-    }
-    // PdfMetadataService round-trips dates through Calendar, rewriting
-    // them in the system zone; unparseable values become null → now.
-    for key in [&b"CreationDate"[..], &b"ModDate"[..]] {
-        if let Some(text) = src_info
-            .as_ref()
-            .and_then(|d| d.get(key).ok())
-            .and_then(|v| decode_text_string(v).ok())
-            .and_then(|t| pdf_date_rezone(&t))
-        {
-            info.set(key, Object::string_literal(text));
-        }
-    }
-    let label = app_version_label();
-    info.set("Producer", Object::string_literal(label.as_str()));
-    info.set("Creator", Object::string_literal(label));
-    let now = pdf_date_now();
-    if !info.has(b"CreationDate") {
-        info.set("CreationDate", Object::string_literal(now.as_str()));
-    }
-    if !info.has(b"ModDate") {
-        info.set("ModDate", Object::string_literal(now.as_str()));
-    }
-    dst.trailer.set("Info", Object::Dictionary(info));
+    carry_info(src, &mut dst);
 
     Ok(dst)
+}
+
+/// `LayerUtility.importPageAsForm`: the page's content stream wrapped in a
+/// Form XObject — `BBox` is the `getCropBox()` view box (crop clipped to
+/// media, media fallback), `/Resources` and the `Group`/`LastModified`/
+/// `Metadata` entries are copied into `dst`, and `/Matrix` maps source user
+/// space into the form's displayed space. Returns the new form object's id.
+pub fn page_as_form(dst: &mut Document, src: &Document, page_id: ObjectId) -> AppResult<ObjectId> {
+    let boxes = page_boxes(src, page_id)?;
+    let rotation = page_rotation(src, page_id)?;
+    let mut map = HashMap::new();
+    page_form_stream(
+        dst,
+        src,
+        page_id,
+        f64_box(boxes.media),
+        f64_box(boxes.crop),
+        rotation,
+        &mut map,
+    )
+}
+
+/// The box `LayerUtility.importPageAsForm` uses as the form's view box:
+/// `PDPage.getCropBox()` — the crop box clipped to the media box, falling
+/// back to the media box. Identical to [`page_boxes`]'s `crop`.
+pub(crate) fn form_view_box(doc: &Document, page_id: ObjectId) -> AppResult<[f64; 4]> {
+    Ok(f64_box(page_boxes(doc, page_id)?.crop))
+}
+
+fn page_form_stream(
+    dst: &mut Document,
+    src: &Document,
+    page_id: ObjectId,
+    media: [f64; 4],
+    view: [f64; 4],
+    rotation: i64,
+    map: &mut HashMap<ObjectId, ObjectId>,
+) -> AppResult<ObjectId> {
+    let page_content = src
+        .get_page_content_with_limit(page_id, 64 * 1024 * 1024)
+        .map_err(pdf_err)?;
+
+    let mut form_dict = Dictionary::new();
+    form_dict.set("Type", "XObject");
+    form_dict.set("Subtype", "Form");
+    form_dict.set(
+        "BBox",
+        Object::Array(view.iter().map(|v| Object::Real(*v as f32)).collect()),
+    );
+    let resources = match page_resources(src, page_id)? {
+        Some((_, resources)) => match copy_value(dst, src, &resources, map)? {
+            Object::Null => Object::Dictionary(Dictionary::new()),
+            copied => copied,
+        },
+        None => Object::Dictionary(Dictionary::new()),
+    };
+    form_dict.set("Resources", resources);
+    // importPageAsForm carries only Group/LastModified/Metadata over
+    // from the page dictionary.
+    if let Ok(page_dict) = src.get_dictionary(page_id) {
+        for key in [&b"Group"[..], &b"LastModified"[..], &b"Metadata"[..]] {
+            if let Ok(value) = page_dict.get(key) {
+                form_dict.set(key, copy_value(dst, src, value, map)?);
+            }
+        }
+    }
+    let at = form_matrix(media, view, rotation);
+    if !at.is_identity() {
+        form_dict.set("Matrix", at.pdf_array());
+    }
+    let form_id = dst.new_object_id();
+    dst.objects.insert(
+        form_id,
+        Object::Stream(Stream::new(form_dict, page_content)),
+    );
+    Ok(form_id)
+}
+
+fn f64_box(b: [f32; 4]) -> [f64; 4] {
+    [b[0] as f64, b[1] as f64, b[2] as f64, b[3] as f64]
+}
+
+/// `LayerUtility.importPageAsForm` with `PDPage` box semantics: the media
+/// box falls back to US Letter and the crop box is clipped to it.
+/// `map` is the caller's object-id
+/// remap, shared across forms so resources clone once per destination
+/// document like PDFBox's `PDFCloneUtility`. Returns the form's object id
+/// in `dst`.
+pub fn import_page_as_form(
+    dst: &mut Document,
+    src: &Document,
+    page_id: ObjectId,
+    map: &mut HashMap<ObjectId, ObjectId>,
+) -> AppResult<ObjectId> {
+    let boxes = page_boxes(src, page_id)?;
+    let media = f64_box(boxes.media);
+    let view = f64_box(boxes.crop);
+    let rotation = page_rotation(src, page_id)?;
+    page_form_stream(dst, src, page_id, media, view, rotation, map)
+}
+
+// ---------------------------------------------------------------------------
+// overlay-pdfs / split-for-poster-print / outline editing
+// ---------------------------------------------------------------------------
+
+/// Adds `form_id` to the `/XObject` dictionary of the resources the page
+/// resolves to — possibly an ancestor `/Pages` node's, matching PDFBox's
+/// inheritable-attribute lookup — under the next free `OL<n>` name, like
+/// `PDResources.add(xobject, "OL")`. Returns the resource name.
+fn register_xobject(doc: &mut Document, page_id: ObjectId, form_id: ObjectId) -> AppResult<String> {
+    let (holder, slot) = match page_resources_holder(doc, page_id) {
+        Some(pair) => pair,
+        None => {
+            // No resources anywhere up the tree: Java installs a fresh
+            // /Resources dictionary on the page itself.
+            doc.get_dictionary_mut(page_id)
+                .map_err(pdf_err)?
+                .set("Resources", Object::Dictionary(Dictionary::new()));
+            (page_id, Object::Dictionary(Dictionary::new()))
+        }
+    };
+    let mut resources_obj = resolve_owned(doc, &slot)
+        .filter(|object| dict_of(object).is_some())
+        .ok_or_else(|| AppError::Pdf("page /Resources is not a dictionary".into()))?;
+    let resources_dict = dict_mut(&mut resources_obj)
+        .ok_or_else(|| AppError::Pdf("page /Resources is not a dictionary".into()))?;
+
+    let xo_slot = resources_dict.get(b"XObject").ok().cloned();
+    let xo_resolved = xo_slot.as_ref().and_then(|o| resolve_owned(doc, o));
+    let xo_had_dict = xo_resolved
+        .as_ref()
+        .is_some_and(|object| dict_of(object).is_some());
+    let mut xo_obj = match xo_resolved {
+        Some(object) if dict_of(&object).is_some() => object,
+        _ => Object::Dictionary(Dictionary::new()),
+    };
+    let xo_dict = dict_mut(&mut xo_obj)
+        .ok_or_else(|| AppError::Pdf("page /Resources/XObject is not a dictionary".into()))?;
+
+    // PDResources.createKey: no dict → "OL1"; otherwise the first free
+    // "OL<n>" counting up from the dict's size.
+    let name = if !xo_had_dict {
+        "OL1".to_string()
+    } else {
+        let mut n = xo_dict.len();
+        loop {
+            n += 1;
+            let key = format!("OL{n}");
+            if !xo_dict.has(key.as_bytes()) {
+                break key;
+            }
+        }
+    };
+    xo_dict.set(name.clone(), Object::Reference(form_id));
+    store_object(
+        doc,
+        resources_dict,
+        b"XObject",
+        xo_slot.as_ref().unwrap_or(&Object::Null),
+        xo_obj,
+    );
+
+    match &slot {
+        Object::Reference(id) => {
+            doc.objects.insert(*id, resources_obj);
+        }
+        _ => {
+            let holder_object = doc
+                .objects
+                .get_mut(&holder)
+                .ok_or_else(|| AppError::Pdf(format!("missing object {holder:?}")))?;
+            let holder_dict = dict_mut(holder_object)
+                .ok_or_else(|| AppError::Pdf("resources holder is not a dictionary".into()))?;
+            holder_dict.set("Resources", resources_obj);
+        }
+    }
+    Ok(name)
+}
+
+/// Stamps one overlay page onto a base page, mirroring PDFBox `Overlay`:
+/// the overlay page's content becomes a Form XObject registered in the
+/// base page's resources, and `/Contents` is rewritten so the form paints
+/// in front of (`foreground`) or behind the existing content, centred on
+/// the base page's media box.
+pub fn overlay_page(
+    base: &mut Document,
+    src: &Document,
+    src_page: ObjectId,
+    base_page: ObjectId,
+    foreground: bool,
+) -> AppResult<()> {
+    let media = media_box(src, src_page)?;
+    let rotation = page_rotation(src, src_page)?;
+    let content = src
+        .get_page_content_with_limit(src_page, 64 * 1024 * 1024)
+        .map_err(pdf_err)?;
+
+    let (w, h) = (media[2] - media[0], media[3] - media[1]);
+    let mut form_dict = Dictionary::new();
+    form_dict.set("Type", "XObject");
+    form_dict.set("Subtype", "Form");
+    form_dict.set("FormType", 1i64);
+    // createOverlayFormXObject retranslates the box to the origin.
+    form_dict.set(
+        "BBox",
+        Object::Array(
+            [0.0, 0.0, w, h]
+                .iter()
+                .map(|v| Object::Real(*v as f32))
+                .collect(),
+        ),
+    );
+    let resources = match page_resources(src, src_page)? {
+        Some((_, resources)) => match copy_value(base, src, &resources, &mut HashMap::new())? {
+            Object::Null => Object::Dictionary(Dictionary::new()),
+            copied => copied,
+        },
+        None => Object::Dictionary(Dictionary::new()),
+    };
+    form_dict.set("Resources", resources);
+    // The rotation compensation of createOverlayFormXObject: the same
+    // translate/quadrantRotate pairs Java applies to the form matrix.
+    let mut at = Affine::identity();
+    match rotation {
+        90 => {
+            at.translate(0.0, w);
+            at.quadrant_rotate(3);
+        }
+        180 => {
+            at.translate(w, h);
+            at.quadrant_rotate(2);
+        }
+        270 => {
+            at.translate(h, 0.0);
+            at.quadrant_rotate(1);
+        }
+        _ => {}
+    }
+    form_dict.set("Matrix", at.pdf_array());
+    let form_id = base.new_object_id();
+    base.objects
+        .insert(form_id, Object::Stream(Stream::new(form_dict, content)));
+
+    let name = register_xobject(base, base_page, form_id)?;
+
+    // calculateAffineTransform centres the rotation-transposed overlay box
+    // on the base page's media box.
+    let (overlay_w, overlay_h) = if matches!(rotation, 90 | 270) {
+        (h, w)
+    } else {
+        (w, h)
+    };
+    let page_media = media_box(base, base_page)?;
+    let h_shift = (page_media[2] - page_media[0] - overlay_w) / 2.0;
+    let v_shift = (page_media[3] - page_media[1] - overlay_h) / 2.0;
+    let overlay_content = format!(
+        "q\nq\n1 0 0 1 {} {} cm\n/{} Do Q\nQ\n",
+        pdf_num(h_shift),
+        pdf_num(v_shift),
+        name
+    );
+
+    // The original /Contents entries are kept as objects — Java's
+    // addOriginalContent splices the existing streams into a new array.
+    let mut original: Vec<Object> = Vec::new();
+    {
+        let page = base.get_dictionary(base_page).map_err(pdf_err)?;
+        if let Ok(contents) = page.get(b"Contents") {
+            let contents = contents.clone();
+            let (_, resolved) = base.dereference(&contents).map_err(pdf_err)?;
+            match resolved {
+                Object::Array(items) => original = items.clone(),
+                Object::Stream(_) => original.push(contents),
+                _ => {}
+            }
+        }
+    }
+
+    let mut add_stream = |bytes: &[u8]| {
+        let id = base.new_object_id();
+        base.objects.insert(
+            id,
+            Object::Stream(Stream::new(Dictionary::new(), bytes.to_vec())),
+        );
+        id
+    };
+    let overlay_stream = add_stream(overlay_content.as_bytes());
+    let (q_stream, cap_stream) = if foreground {
+        (Some(add_stream(b"q\n")), Some(add_stream(b"Q\n")))
+    } else {
+        (None, None)
+    };
+
+    let mut contents = Vec::with_capacity(original.len() + 3);
+    if let Some(q) = q_stream {
+        contents.push(Object::Reference(q));
+    }
+    if !foreground {
+        contents.push(Object::Reference(overlay_stream));
+    }
+    contents.extend(original);
+    if let Some(cap) = cap_stream {
+        contents.push(Object::Reference(cap));
+    }
+    if foreground {
+        contents.push(Object::Reference(overlay_stream));
+    }
+    base.get_dictionary_mut(base_page)
+        .map_err(pdf_err)?
+        .set("Contents", Object::Array(contents));
+    Ok(())
+}
+
+/// `LayerUtility.importPageAsForm` as `PosterPdfController` uses it: the
+/// page's MediaBox and CropBox are both forced to the crop box first, so
+/// the form's user space starts at the crop box origin. Returns the form's
+/// object id and the view box it was built from — the coordinate space the
+/// poster grid's crop rectangles live in.
+pub fn poster_page_form(
+    dst: &mut Document,
+    src: &Document,
+    page_id: ObjectId,
+    map: &mut HashMap<ObjectId, ObjectId>,
+) -> AppResult<(ObjectId, [f64; 4])> {
+    let view = form_view_box(src, page_id)?;
+    let rotation = page_rotation(src, page_id)?;
+    let id = page_form_stream(dst, src, page_id, view, view, rotation, map)?;
+    Ok((id, view))
+}
+
+/// Appends a fully-built page dictionary to the document's page tree, like
+/// `PDDocument.addPage`: `Parent` is set to the tree root and `/Kids`,
+/// `/Count` are updated. Returns the new page's object id.
+pub fn append_page(doc: &mut Document, mut page: Dictionary) -> AppResult<ObjectId> {
+    let root = pages_root(doc)?;
+    let id = doc.new_object_id();
+    page.set("Parent", root);
+    doc.objects.insert(id, Object::Dictionary(page));
+    let root_dict = doc.get_dictionary_mut(root).map_err(pdf_err)?;
+    let mut kids = root_dict
+        .get(b"Kids")
+        .and_then(|k| k.as_array())
+        .map_err(pdf_err)?
+        .clone();
+    kids.push(Object::Reference(id));
+    root_dict.set("Kids", Object::Array(kids));
+    let count = root_dict
+        .get(b"Count")
+        .and_then(|c| c.as_i64())
+        .unwrap_or(0);
+    root_dict.set("Count", count + 1);
+    Ok(id)
+}
+
+/// One node of the extracted outline tree for `extract-bookmarks`: the raw
+/// title (`None` when absent), the 0-based destination page index (`None`
+/// for non-local destinations), and children.
+#[derive(Debug)]
+pub struct TocNode {
+    pub title: Option<String>,
+    pub page: Option<usize>,
+    pub children: Vec<TocNode>,
+}
+
+/// Walks the catalog `/Outlines` tree for `extract-bookmarks`, mirroring
+/// `EditTableOfContentsController.processChildren`: each item is emitted
+/// once across the whole walk and nesting is capped at depth 64.
+pub fn outline_bookmarks(doc: &Document) -> AppResult<Vec<TocNode>> {
+    let catalog = doc.catalog().map_err(pdf_err)?;
+    let Some(outlines) = catalog.get(b"Outlines").ok() else {
+        return Ok(Vec::new());
+    };
+    let Some(root) = dict_owned(doc, outlines)? else {
+        return Ok(Vec::new());
+    };
+    let Some(first) = root.get(b"First").ok() else {
+        return Ok(Vec::new());
+    };
+    let pages = page_lookup(doc)?;
+    let mut visited = HashSet::new();
+    let mut nodes = Vec::new();
+    outline_bookmarks_level(doc, first, &pages, &mut visited, 0, &mut nodes)?;
+    Ok(nodes)
+}
+
+fn outline_bookmarks_level(
+    doc: &Document,
+    first: &Object,
+    pages: &HashMap<ObjectId, usize>,
+    visited: &mut HashSet<ObjectId>,
+    depth: usize,
+    out: &mut Vec<TocNode>,
+) -> AppResult<()> {
+    const MAX_OUTLINE_DEPTH: usize = 64;
+    if depth > MAX_OUTLINE_DEPTH {
+        return Ok(());
+    }
+    let mut current = Some(first.clone());
+    while let Some(object) = current {
+        let Some(dict) = dict_owned(doc, &object)? else {
+            break;
+        };
+        // Java dedupes on the item's COSDictionary identity; only indirect
+        // objects can be shared, so direct dictionaries need no check.
+        let seen = object
+            .as_reference()
+            .ok()
+            .is_some_and(|id| !visited.insert(id));
+        if !seen {
+            let title = dict.get(b"Title").ok().and_then(|t| {
+                let (_, resolved) = doc.dereference(t).ok()?;
+                decode_text_string(resolved).ok()
+            });
+            let page = outline_dest_page(doc, &dict, pages)?;
+            let mut children = Vec::new();
+            if let Ok(first_child) = dict.get(b"FirstChild") {
+                outline_bookmarks_level(
+                    doc,
+                    first_child,
+                    pages,
+                    visited,
+                    depth + 1,
+                    &mut children,
+                )?;
+            }
+            out.push(TocNode {
+                title,
+                page,
+                children,
+            });
+        }
+        current = dict.get(b"Next").ok().cloned();
+    }
+    Ok(())
+}
+
+/// One node of the replacement outline for `edit-table-of-contents`:
+/// `page` is a validated 0-based page index.
+#[derive(Debug)]
+pub struct OutlineSpec {
+    pub title: String,
+    pub page: usize,
+    pub children: Vec<OutlineSpec>,
+}
+
+/// Replaces the catalog `/Outlines` tree with `items`, like
+/// `EditTableOfContentsController`: a fresh outline root, `/XYZ`
+/// destinations, and PDFBox's count bookkeeping — every node is created
+/// closed, so each parent's `/Count` is minus its direct-child count and
+/// the root's is minus the top-level count.
+pub fn write_outline(doc: &mut Document, items: &[OutlineSpec]) -> AppResult<()> {
+    let pages = page_ids(doc);
+    let root_id = doc.new_object_id();
+    let mut root = Dictionary::new();
+    root.set("Type", "Outlines");
+    doc.objects.insert(root_id, Object::Dictionary(root));
+
+    let top = outline_level(doc, items, root_id, &pages)?;
+    if !top.is_empty() {
+        let root_dict = doc.get_dictionary_mut(root_id).map_err(pdf_err)?;
+        root_dict.set("First", top[0]);
+        root_dict.set("Last", *top.last().unwrap());
+        root_dict.set("Count", -(top.len() as i64));
+    }
+    let catalog_id = match doc.trailer.get(b"Root") {
+        Ok(Object::Reference(id)) => *id,
+        _ => return Err(AppError::Pdf("document has no catalog".into())),
+    };
+    doc.get_dictionary_mut(catalog_id)
+        .map_err(pdf_err)?
+        .set("Outlines", root_id);
+    Ok(())
+}
+
+fn outline_level(
+    doc: &mut Document,
+    items: &[OutlineSpec],
+    parent: ObjectId,
+    pages: &[ObjectId],
+) -> AppResult<Vec<ObjectId>> {
+    let mut ids = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(&page_id) = pages.get(item.page) else {
+            return Err(AppError::BadRequest(format!(
+                "outline page index {} out of range ({} pages)",
+                item.page + 1,
+                pages.len()
+            )));
+        };
+        let id = doc.new_object_id();
+        let mut dict = Dictionary::new();
+        dict.set("Title", outline_text(&item.title));
+        dict.set("Parent", parent);
+        // PDPageXYZDestination with only the page set: [page /XYZ null…].
+        dict.set(
+            "Dest",
+            Object::Array(vec![
+                Object::Reference(page_id),
+                Object::Name(b"XYZ".to_vec()),
+                Object::Null,
+                Object::Null,
+                Object::Null,
+            ]),
+        );
+        doc.objects.insert(id, Object::Dictionary(dict));
+        ids.push(id);
+    }
+    for pair in ids.windows(2) {
+        doc.get_dictionary_mut(pair[0])
+            .map_err(pdf_err)?
+            .set("Next", pair[1]);
+        doc.get_dictionary_mut(pair[1])
+            .map_err(pdf_err)?
+            .set("Prev", pair[0]);
+    }
+    for (item, &id) in items.iter().zip(&ids) {
+        if item.children.is_empty() {
+            continue;
+        }
+        let children = outline_level(doc, &item.children, id, pages)?;
+        let dict = doc.get_dictionary_mut(id).map_err(pdf_err)?;
+        dict.set("FirstChild", children[0]);
+        dict.set("LastChild", *children.last().unwrap());
+        dict.set("Count", -(children.len() as i64));
+    }
+    Ok(ids)
+}
+
+/// PDF text string for outline titles: literal for ASCII (PDFDocEncoding
+/// territory), UTF-16BE hex otherwise — the encodings `COSString` picks.
+fn outline_text(value: &str) -> Object {
+    if value.is_ascii() {
+        Object::string_literal(value.as_bytes().to_vec())
+    } else {
+        let mut bytes = vec![0xFE, 0xFF];
+        for unit in value.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_be_bytes());
+        }
+        Object::String(bytes, StringFormat::Hexadecimal)
+    }
 }
 
 #[cfg(test)]
@@ -2244,5 +3159,125 @@ mod tests {
             .collect();
         assert!((values[4] - -100.0).abs() < 0.01);
         assert!((values[5] - -200.0).abs() < 0.01);
+    }
+
+    /// Two pages; a text field's widget sits on page 2 only. Subsetting to
+    /// page 1 then pruning must drop the field and its `/AcroForm`.
+    #[test]
+    fn prune_orphaned_form_fields_drops_fields_on_removed_pages() {
+        let mut pdf = testkit::Pdf::new();
+        let page2 = pdf.add_page([0, 0, 612, 792].map(|v| v as i64), Dictionary::new());
+        let widget = pdf.add(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Widget",
+            "FT" => "Tx",
+            "T" => "gone",
+            "Rect" => Object::Array(vec![0.into(), 0.into(), 10.into(), 10.into()]),
+            "P" => Object::Reference(page2),
+        });
+        let field = pdf.add(dictionary! {
+            "FT" => "Tx",
+            "T" => "gone",
+            "Kids" => vec![Object::Reference(widget)],
+        });
+        let acroform = pdf.add(dictionary! {
+            "Fields" => vec![Object::Reference(field)],
+        });
+        pdf.edit_catalog(|catalog| {
+            catalog.set("AcroForm", Object::Reference(acroform));
+        });
+        {
+            let mut p2 = pdf.dict(page2);
+            p2.set("Annots", vec![Object::Reference(widget)]);
+            pdf.put_dict(page2, p2);
+        }
+
+        let bytes = pdf.bytes();
+        let mut doc = Document::load_mem(&bytes).unwrap();
+        subset(&mut doc, &[0]).unwrap();
+        prune_orphaned_form_fields(&mut doc).unwrap();
+
+        let catalog = doc.catalog().unwrap();
+        assert!(catalog.get(b"AcroForm").is_err());
+    }
+
+    /// Same fixture, but the widget survives on the kept page: the field
+    /// and its `/Kids` must be preserved.
+    #[test]
+    fn prune_orphaned_form_fields_keeps_live_widgets() {
+        let mut pdf = testkit::Pdf::new();
+        let widget = pdf.add(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Widget",
+            "FT" => "Tx",
+            "T" => "kept",
+            "Rect" => Object::Array(vec![0.into(), 0.into(), 10.into(), 10.into()]),
+            "P" => Object::Reference(pdf.page),
+        });
+        let field = pdf.add(dictionary! {
+            "FT" => "Tx",
+            "T" => "kept",
+            "Kids" => vec![Object::Reference(widget)],
+        });
+        let acroform = pdf.add(dictionary! {
+            "Fields" => vec![Object::Reference(field)],
+        });
+        pdf.edit_catalog(|catalog| {
+            catalog.set("AcroForm", Object::Reference(acroform));
+        });
+        pdf.edit_page(|page| {
+            page.set("Annots", vec![Object::Reference(widget)]);
+        });
+
+        let bytes = pdf.bytes();
+        let mut doc = Document::load_mem(&bytes).unwrap();
+        subset(&mut doc, &[0]).unwrap();
+        prune_orphaned_form_fields(&mut doc).unwrap();
+
+        let catalog = doc.catalog().unwrap();
+        let acro = catalog.get(b"AcroForm").unwrap();
+        let (_, acro_obj) = doc.dereference(acro).unwrap();
+        let Object::Dictionary(acro_dict) = acro_obj else {
+            panic!("AcroForm is not a dictionary");
+        };
+        let Ok(Object::Array(fields)) = acro_dict.get(b"Fields") else {
+            panic!("/Fields is not an array");
+        };
+        assert_eq!(fields.len(), 1);
+    }
+
+    /// `PDPage.getCropBox()` clips to the media box, so a CropBox reaching
+    /// past it must not leak into the Form XObject's `BBox`.
+    #[test]
+    fn to_single_page_clips_crop_box_to_media_box() {
+        let mut pdf = testkit::Pdf::new();
+        give_contents(&mut pdf);
+        pdf.edit_page(|page| {
+            page.set(
+                "CropBox",
+                Object::Array(vec![
+                    Object::Integer(-50),
+                    Object::Integer(-50),
+                    Object::Integer(700),
+                    Object::Integer(900),
+                ]),
+            );
+        });
+
+        let single = run(&mut pdf);
+        let form = form_dict(&single, "Fm0");
+        let bbox = form.get(b"BBox").unwrap();
+        let Object::Array(bbox) = bbox else {
+            panic!("BBox is not an array");
+        };
+        let nums: Vec<f64> = bbox
+            .iter()
+            .map(|o| match o {
+                Object::Real(f) => *f as f64,
+                Object::Integer(i) => *i as f64,
+                _ => panic!("BBox element is not a number"),
+            })
+            .collect();
+        assert_eq!(nums, vec![0.0, 0.0, 612.0, 792.0]);
     }
 }

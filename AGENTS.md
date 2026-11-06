@@ -18,8 +18,7 @@ Task `desc:` fields should describe **what** the task does, not **how** it does 
 - `task format` — auto-fix formatting across all components
 - `task check` — full quality gate (lint + typecheck + test)
 - `task clean` — clean all build artifacts
-- `task docker:build` — build standard Docker image
-- `task docker:up` — start Docker compose stack
+- `task rust:dev` — start the Rust backend service
 
 ## Comments
 
@@ -64,20 +63,15 @@ A comment block over ~12 lines outside a file or type header usually means the c
 - **Build project**: `task build`
 - **Run backend locally**: `task backend:dev`
 - **Run all tests**: `task test` (or individually: `task backend:test`, `task frontend:test`, `task engine:test`)
-- **Docker integration tests**: `./test.sh` (builds all Docker variants and runs comprehensive tests)
 - **Code formatting**: `task format` (or `task backend:format` for Java only)
 - **Full quality gate**: `task check` (runs lint + typecheck + test across all components)
 
 After modifying any files in the project, you must run the relevant `task check` command that covers that area of the code. For example, when editing frontend files run `task frontend:check`; for Python engine files run `task engine:check`; for Java backend files run `task backend:check`.
 
-### Docker Development
-- **Build standard**: `task docker:build` (or `docker build -t stirling-pdf -f docker/embedded/Dockerfile .`)
-- **Build fat version**: `task docker:build:fat`
-- **Build ultra-lite**: `task docker:build:ultra-lite`
-- **Start compose stack**: `task docker:up` (or `task docker:up:fat`, `task docker:up:ultra-lite`)
-- **Stop compose stack**: `task docker:down`
-- **View logs**: `task docker:logs`
-- **Example compose files**: Located in `exampleYmlFiles/` directory
+### Container Runtimes (archived)
+Docker images, compose stacks, and container-based CI live in `runtime/` —
+the project runs natively and does not need Docker for development. See
+`runtime/README.md` for contents and restore instructions.
 
 ### Security Mode Development
 Set `DOCKER_ENABLE_SECURITY=true` environment variable to enable security features during development. This is required for testing the full version locally.
@@ -461,7 +455,7 @@ The frontend is organized with a clear separation of concerns:
 
 ### Testing Strategy
 - **Integration Tests**: Cucumber tests in `testing/cucumber/`
-- **Docker Testing**: `test.sh` validates all Docker variants
+- **Container Testing**: Docker-based test matrices are archived under `runtime/testing/`
 - **Manual Testing**: No unit tests currently - relies on UI and API testing
 
 #### No fixed waits in tests
@@ -474,7 +468,7 @@ Never sleep in tests (`page.waitForTimeout`, `Thread.sleep`, etc.) - it causes f
    - All services (including AI engine): `task dev:all`
    - Or individually: `task backend:dev` (localhost:8080), `task frontend:dev` (localhost:5173), `task engine:dev` (localhost:5001)
 2. **Quality Gate**: Run `task check` before submitting PRs
-3. **Docker Testing**: Use `./test.sh` for full Docker integration tests
+3. **Container Testing**: Docker test matrices are archived under `runtime/`
 4. **Code Style**: Spotless enforces Google Java Format automatically (`task backend:format`)
 5. **Translations**:
    - Backend: Use helper scripts in `/scripts` for multi-language updates

@@ -4,6 +4,7 @@ pub mod document_classifier;
 pub mod documents;
 pub mod health;
 pub mod pdf_comments;
+pub mod pdf_edit;
 
 use axum::Router;
 
@@ -20,6 +21,7 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/v1/ai/pdf-comment-agent", pdf_comments::router())
         .nest("/api/v1/agents", agents::router())
         .nest("/api/v1/docparse", docparse::router())
+        .nest("/api/v1/pdf", pdf_edit::router())
         // Python applies the identity gate to every router except config push.
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

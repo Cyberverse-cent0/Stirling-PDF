@@ -44,7 +44,7 @@ pub fn endpoint(_attr: TokenStream, item: TokenStream) -> TokenStream {
 fn expand(mut input: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
     if input.sig.asyncness.is_some() {
         return Err(syn::Error::new_spanned(
-            &input.sig.fn_token,
+            input.sig.fn_token,
             "#[endpoint] work functions must be synchronous; \
              the macro already runs them on the blocking pool",
         ));

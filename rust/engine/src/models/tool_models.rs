@@ -249,6 +249,100 @@ impl ToolEndpoint {
             Self::TimestampPdf => "/api/v1/security/timestamp-pdf",
         }
     }
+
+    /// Python `ToolEndpoint.NAME` — the SCREAMING_SNAKE member name the
+    /// planner prompts use (`f"{op.name} ({op.value})"`).
+    pub fn member_name(&self) -> String {
+        let debug = format!("{self:?}");
+        let mut out = String::with_capacity(debug.len() + 4);
+        for (i, ch) in debug.chars().enumerate() {
+            if ch.is_ascii_uppercase() && i > 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_uppercase());
+        }
+        out
+    }
+
+    /// Every endpoint, in `OPERATIONS` order (matches Python iteration).
+    pub const ALL: [ToolEndpoint; 76] = [
+        ToolEndpoint::CbrToPdf,
+        ToolEndpoint::CbzToPdf,
+        ToolEndpoint::EbookToPdf,
+        ToolEndpoint::EmlToPdf,
+        ToolEndpoint::FileToPdf,
+        ToolEndpoint::HtmlToPdf,
+        ToolEndpoint::ImgToPdf,
+        ToolEndpoint::MarkdownToPdf,
+        ToolEndpoint::PdfToCbr,
+        ToolEndpoint::PdfToCbz,
+        ToolEndpoint::PdfToCsv,
+        ToolEndpoint::PdfToEpub,
+        ToolEndpoint::PdfToHtml,
+        ToolEndpoint::PdfToImg,
+        ToolEndpoint::PdfToMarkdown,
+        ToolEndpoint::PdfToPdfa,
+        ToolEndpoint::PdfToPresentation,
+        ToolEndpoint::PdfToText,
+        ToolEndpoint::PdfToUa,
+        ToolEndpoint::PdfToVector,
+        ToolEndpoint::PdfToWord,
+        ToolEndpoint::PdfToXlsx,
+        ToolEndpoint::PdfToXml,
+        ToolEndpoint::SvgToPdf,
+        ToolEndpoint::UrlToPdf,
+        ToolEndpoint::VectorToPdf,
+        ToolEndpoint::BookletImposition,
+        ToolEndpoint::Crop,
+        ToolEndpoint::EditTableOfContents,
+        ToolEndpoint::MergePdfs,
+        ToolEndpoint::MultiPageLayout,
+        ToolEndpoint::PdfToSinglePage,
+        ToolEndpoint::RearrangePages,
+        ToolEndpoint::RemoveImagePdf,
+        ToolEndpoint::RemovePages,
+        ToolEndpoint::RotatePdf,
+        ToolEndpoint::ScalePages,
+        ToolEndpoint::SplitBySizeOrCount,
+        ToolEndpoint::SplitForPosterPrint,
+        ToolEndpoint::SplitPages,
+        ToolEndpoint::SplitPdfByChapters,
+        ToolEndpoint::SplitPdfBySections,
+        ToolEndpoint::AddComments,
+        ToolEndpoint::AddPageNumbers,
+        ToolEndpoint::AddStamp,
+        ToolEndpoint::AutoRename,
+        ToolEndpoint::AutoRotatePdf,
+        ToolEndpoint::AutoSplitPdf,
+        ToolEndpoint::BatchProcessAttachments,
+        ToolEndpoint::CompressPdf,
+        ToolEndpoint::CreatePortfolio,
+        ToolEndpoint::DeleteAttachment,
+        ToolEndpoint::ExtractAttachments,
+        ToolEndpoint::ExtractImageScans,
+        ToolEndpoint::ExtractImages,
+        ToolEndpoint::ExtractSingleAttachment,
+        ToolEndpoint::Flatten,
+        ToolEndpoint::FlattenPortfolio,
+        ToolEndpoint::OcrPdf,
+        ToolEndpoint::RemoveBlanks,
+        ToolEndpoint::RenameAttachment,
+        ToolEndpoint::Repair,
+        ToolEndpoint::ReplaceInvertPdf,
+        ToolEndpoint::ScannerEffect,
+        ToolEndpoint::UnlockPdfForms,
+        ToolEndpoint::UpdateMetadata,
+        ToolEndpoint::AccessibilityReport,
+        ToolEndpoint::AddPassword,
+        ToolEndpoint::AddWatermark,
+        ToolEndpoint::AutoRedact,
+        ToolEndpoint::Redact,
+        ToolEndpoint::RedactExecute,
+        ToolEndpoint::RemoveCertSign,
+        ToolEndpoint::RemovePassword,
+        ToolEndpoint::SanitizePdf,
+        ToolEndpoint::TimestampPdf,
+    ];
 }
 
 /// Engine-emitted agent tools not present in the OpenAPI spec.

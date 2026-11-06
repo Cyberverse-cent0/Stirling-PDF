@@ -313,6 +313,8 @@ scripts/pdf-collection/
 # Local screenshot artifacts from *-screenshots.spec.ts
 frontend/screenshots/
 frontend/src-tauri/libs/.variant
+# Staged Tauri sidecar binaries (task desktop:rust-server output)
+frontend/src-tauri/binaries/
 
 # Dev-loop process state (scripts/run.sh)
 .run/
@@ -320,3 +322,5 @@ frontend/src-tauri/libs/.variant
 # Rust build artifacts
 rust/target/
 rust/pdfium-native/target/
+target/
+

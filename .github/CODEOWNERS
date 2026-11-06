@@ -20,9 +20,9 @@
 /app/core/src/main/resources/static/** @Stirling-Tools/frontend-reviewers @Ludy87 @balazs-szucs
 
 # V2 docker
-/docker/backend/** @Stirling-Tools/devops-reviewers @Ludy87
-/docker/frontend/** @Stirling-Tools/frontend-reviewers @Stirling-Tools/devops-reviewers @Ludy87
-/docker/compose/** @Stirling-Tools/frontend-reviewers @Stirling-Tools/devops-reviewers @Ludy87
+/runtime/docker/backend/** @Stirling-Tools/devops-reviewers @Ludy87
+/runtime/docker/frontend/** @Stirling-Tools/frontend-reviewers @Stirling-Tools/devops-reviewers @Ludy87
+/runtime/docker/compose/** @Stirling-Tools/frontend-reviewers @Stirling-Tools/devops-reviewers @Ludy87
 
 # GHA (all users)
 /.github/** @Stirling-Tools/all @Ludy87 @balazs-szucs

@@ -31,10 +31,11 @@ The Python engine remains the parity oracle until cutover; see
   with two backends:
   - `SqliteVecStore` — schema-identical port incl. WAL, busy_timeout,
     per-`(collection, owner_id)` vector tables, ACL-gated reads. KNN is
-    pure Rust: embeddings are f32-le blobs in plain tables, scored by a
-    rayon-parallel dot-product scan over an in-memory decoded cache —
-    equivalent to the old vendored sqlite-vec `vec0` tables, which ran
-    the same brute-force search without an ANN index.
+    pure Rust: embeddings are normalized f32-le blobs in plain tables,
+    scored by a rayon-parallel dot-product scan over an in-memory decoded
+    cache. Equivalent to the old vendored sqlite-vec `vec0` tables, which
+    ran the same brute-force search without an ANN index. See
+    "Vector store" below.
   - `PgVectorStore` — sqlx pool, lazy schema bootstrap (`CREATE EXTENSION
     vector` first), vectors bound as pgvector text literals.
 - **DocumentService** — `src/documents/service.rs`: replace-ingest,
@@ -94,6 +95,79 @@ The Python engine remains the parity oracle until cutover; see
 - Python test-suite port (~47 pytest files) and the Java↔Rust parity
   harness.
 
+## Vector store (SqliteVecStore)
+
+`src/documents/sqlite_vec_store.rs` is a pure-Rust replacement for the
+Python store's vendored sqlite-vec `vec0` extension — no C code, no
+`build.rs`, no loadable extension.
+
+**Storage.** Each `(collection, owner_id)` pair gets a plain table
+`vec_<owner>_<collection>` (names sanitized to `[A-Za-z0-9_]`; on
+collision a hash suffix is appended so distinct pairs never share a
+table) holding one `embedding BLOB` column: `dim` little-endian f32s,
+L2-normalized at write time. `collections(dim, table_name)` records the
+layout; `documents`, `document_pages`, `document_acl`,
+`documents_meta` are unchanged from the Python schema.
+
+**Similarity.** Stored and query vectors are unit-normalized, so the dot
+product *is* the cosine similarity; scores are `max(0, dot)` returned as
+`f64` — the same `max(0, 1 - L2²/2)` the vec0 `MATCH` query produced.
+Normalization sums squares in f64 (f32 accumulation could overflow to an
+infinite norm); a zero vector passes through unchanged and scores 0.
+Top-k uses `select_nth_unstable_by` with a `(score desc, rowid asc)`
+tiebreak, so results are deterministic. Dimension mismatches are
+rejected both at ingest (per-batch consistency) and at query time.
+
+**Search path.** The first search on a collection decodes every blob
+into a row-major `Vec<f32>` matrix cached under the table name; repeat
+searches skip SQLite entirely for scoring and only hydrate the top-k
+`documents` rows. The decoded cache is an LRU bounded by
+`STIRLING_DOCUMENTS_CACHE_MB` (default 256 MiB) accounting `rowids` +
+vector payload bytes; the newest entry is always kept even when it alone
+exceeds the budget, and evicted entries are transparently rebuilt on next
+use. It is invalidated on every mutation — `add_documents`,
+`delete_collection`, `purge_owner`, `reap_expired`.
+
+Cached searches take the index `Arc` under the connection lock, release
+it for the rayon scan, then re-acquire the lock and verify the cached
+entry is still the same `Arc` before hydrating — a committed write always
+invalidates the entry, so pointer equality proves the snapshot is
+current. Stale snapshots retry (up to 3 times, then a fully serialized
+fallback), which lets concurrent cached searches run in parallel while
+writes, hydration and index builds stay serialized on the connection
+mutex.
+
+**Legacy migration.** Databases written by the Python engine contain
+`vec0` virtual tables that this binary cannot even `DROP` (the module
+isn't registered, so prepare fails). On open, `init_schema` finds them
+via `sqlite_master ... LIKE '%USING vec0%'` and removes the catalog rows
+directly with `PRAGMA writable_schema` — the vtab row plus its shadow
+tables (`<name>_chunks`, `<name>_rowids`, `<name>_vector_chunksNN`, …,
+matched by name prefix and excluding names registered in `collections`)
+— then bumps `schema_version` and deletes the derived `documents` /
+`collections` rows in one transaction. `documents_meta`, `document_pages`,
+`document_acl` and unrelated tables survive; orphaned shadow-table pages
+remain until `VACUUM`. The operation is idempotent, and a `collections`
+row whose table is missing (partial migration) is reset on next ingest.
+Only derived embeddings are lost — the collection must be re-ingested.
+
+**Benchmarks** (`cargo test --release --test vec_store_bench -- --ignored
+--test-threads=1`, ephemeral DB, 8 threads, LCG vectors, 1 024-doc ingest
+batches):
+
+| n × dim | ingest | first search | cached search | 4-way concurrent |
+| --- | --- | --- | --- | --- |
+| 1 000 × 384 | 37 ms | 3.4 ms | 1.2 ms | 0.9 ms/op |
+| 20 000 × 768 | 0.90 s | 84 ms | 12 ms | 14 ms/op |
+| 50 000 × 768 | 1.79 s | 265 ms | 32 ms | 33 ms/op |
+
+The scan is memory-bandwidth-bound dot products (~22–28k docs/s ingest);
+there is no ANN index — brute force is the documented design, matching
+the vec0 behavior it replaces. Concurrent cached searches now scan in
+parallel; for large collections the scan saturates all cores anyway, so
+per-op latency under 4-way concurrency is roughly the cached latency,
+while small collections benefit ~3× from overlapping scans.
+
 ## Configuration
 
 Identical env vars to the Python engine (`STIRLING_*`); `.env` then
@@ -105,6 +179,7 @@ Identical env vars to the Python engine (`STIRLING_*`); `.env` then
 | `STIRLING_DOCUMENTS_BACKEND` | `sqlite` | `sqlite` \| `pgvector` |
 | `STIRLING_DOCUMENTS_SQLITE_PATH` | `data/documents.db` | relative to crate root |
 | `STIRLING_DOCUMENTS_PGVECTOR_DSN` | — | required for pgvector |
+| `STIRLING_DOCUMENTS_CACHE_MB` | `256` | decoded vector-index cache budget |
 | `STIRLING_RAG_EMBEDDING_MODEL` | — | `voyageai:model`, `openai:…`, or bare name |
 | `STIRLING_RAG_CHUNK_SIZE` / `_OVERLAP` | `512` / `64` | characters |
 | `STIRLING_RAG_TOP_K` | `5` | |

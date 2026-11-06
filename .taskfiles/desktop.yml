@@ -37,15 +37,27 @@ tasks:
     desc: "Prepare desktop build dependencies"
     deps:
       - jlink
+      - rust-server
       - task: ":frontend:prepare"
         vars: { MODE: desktop }
       - provisioner
 
   provisioner:
-    desc: "Build installer provisioner"
+    desc: "Build Windows installer artifacts"
     platforms: [windows]
+    dir: src-tauri
     cmds:
-      - node scripts/build-provisioner.mjs
+      - cargo run --release --package stirling-desktop-build -- build-provisioner
+
+  rust-server:
+    desc: "Build stirling-server and stage it as a Tauri sidecar binary"
+    dir: ..
+    cmds:
+      - cargo build --release --manifest-path rust/Cargo.toml --bin stirling-server
+      - cmd: cargo run --release --manifest-path frontend/src-tauri/Cargo.toml --package stirling-desktop-build -- stage-rust-server rust/target/release/stirling-server.exe frontend/src-tauri/binaries
+        platforms: [windows]
+      - cmd: cargo run --release --manifest-path frontend/src-tauri/Cargo.toml --package stirling-desktop-build -- stage-rust-server rust/target/release/stirling-server frontend/src-tauri/binaries
+        platforms: [linux, darwin]
 
   dev:
     desc: "Start Tauri desktop dev mode"
@@ -92,6 +104,14 @@ tasks:
     cmds:
       - cargo test
 
+  rust-utils:check:
+    desc: "Check the standalone Rust utility library"
+    dir: src-tauri/src/utils
+    cmds:
+      - cargo fmt --check
+      - cargo clippy --all-targets -- -D warnings
+      - cargo test
+
   # ============================================================
   # Lint, format, test
   # ============================================================
@@ -100,6 +120,7 @@ tasks:
     desc: "Run linting"
     cmds:
       - task: lint:app
+      - task: lint:build-tools
       - task: lint:provisioner
       - task: lint:thumbnail-handler
 
@@ -120,6 +141,12 @@ tasks:
     cmds:
       - cargo clippy --all-targets -- -D warnings
 
+  lint:build-tools:
+    desc: "Lint desktop build tools"
+    dir: src-tauri
+    cmds:
+      - cargo clippy --package stirling-desktop-build --all-targets -- -D warnings
+
   lint:thumbnail-handler:
     desc: "Lint the Windows thumbnail handler crate"
     platforms: [windows]
@@ -138,9 +165,18 @@ tasks:
   check:
     desc: "Full desktop quality gate"
     cmds:
+      - task: rust-utils:check
+      - task: ":frontend:typecheck:desktop"
       - task: lint
+      - task: test:build-tools
       - task: format:check
       - task: test
+
+  test:build-tools:
+    desc: "Test desktop build tools"
+    dir: src-tauri
+    cmds:
+      - cargo test --package stirling-desktop-build
 
   clean:
     desc: "Clean Tauri/Cargo build artifacts"
@@ -168,7 +204,7 @@ tasks:
     env:
       REQUIRED_JAVA: "{{.REQUIRED_JAVA}}"
     cmds:
-      - node scripts/verify-bundled-jre.mjs src-tauri/runtime/jre/release
+      - cargo run --release --manifest-path src-tauri/Cargo.toml --package stirling-desktop-build -- verify-bundled-jre src-tauri/runtime/jre/release
 
   jlink:jar:
     desc: "Build backend JAR for Tauri bundling (host-OS natives only by default)"
@@ -185,7 +221,7 @@ tasks:
       # The bundle globs libs/*.jar, so an old jar left behind would ship too
       # (and could be selected as the backend). The script stages only the jar
       # this build just produced, replacing whatever the last build left there.
-      - node frontend/scripts/stage-backend-jar.mjs app/core/build/libs frontend/src-tauri/libs
+      - cargo run --release --manifest-path frontend/src-tauri/Cargo.toml --package stirling-desktop-build -- stage-backend-jar app/core/build/libs frontend/src-tauri/libs
 
   jlink:runtime:
     desc: "Create custom JRE with jlink"
@@ -241,6 +277,18 @@ tasks:
       # 444 in production, split the chmod into a dev-only step and have
       # `desktop:build` run `jlink:clean` first to force a fresh build.
       - cmd: chmod -R u+w runtime/jre
+        platforms: [linux, darwin]
+      # Fedora/RHEL JDKs ship java.security with
+      # `include redhat/${redhat.crypto-policies}/crypto-policies.properties`;
+      # jlink copies java.security but not the redhat/ directory, so the
+      # bundled JRE dies at startup with InternalError. Copy it when the
+      # build JDK has it — other distros lack both the include and the dir.
+      - cmd: |
+          JH="${JAVA_HOME:-$(dirname "$(dirname "$(readlink -f "$(command -v jlink)")")")}"
+          if [ -d "$JH/conf/security/redhat" ]; then
+            mkdir -p runtime/jre/conf/security
+            cp -R "$JH/conf/security/redhat" runtime/jre/conf/security/
+          fi
         platforms: [linux, darwin]
       # Single-quoted so Task's shell leaves `$_` and `$false` alone. Double
       # quotes let it expand them as its own variables, and since neither is

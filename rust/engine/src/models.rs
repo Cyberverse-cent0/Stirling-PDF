@@ -1,8 +1,11 @@
 //! Boundary identifier types. The Python engine uses `NewType(str)` for these;
 //! they are opaque strings on the wire, so plain aliases keep serde trivial.
 
+pub mod tool_io;
 pub mod tool_models;
 pub mod tool_params;
+pub mod tool_schemas;
+pub mod tool_texts;
 
 pub use tool_models::{AgentToolId, ToolEndpoint, ToolId};
 

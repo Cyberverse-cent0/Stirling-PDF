@@ -525,9 +525,11 @@ export default defineConfig(async ({ mode, command }) => {
   // Subpath the app is served under (base becomes "/<runSubpath>/"). Empty = root.
   const runSubpath = (env.RUN_SUBPATH || "").replace(/^\/+|\/+$/g, "");
 
-  // Backend proxy target: default localhost:8080. Override via BACKEND_URL env var
-  // so the top-level dev launcher can wire a dynamically-assigned backend port.
-  const backendUrl = process.env.BACKEND_URL || "http://localhost:8080";
+  // Backend proxy target: default localhost:8081 (the Rust backend, now the
+  // standalone default). Override via BACKEND_URL env var — e.g. to :8080 for
+  // the Java backend while proprietary/saas features still need it, or so the
+  // top-level dev launcher can wire a dynamically-assigned backend port.
+  const backendUrl = process.env.BACKEND_URL || "http://localhost:8081";
   // Allow host header checks to be configured via env so LAN/reverse-proxy
   // dev setups don't require editing this file for each machine.
   const allowedHostsRaw =
@@ -544,7 +546,7 @@ export default defineConfig(async ({ mode, command }) => {
   };
 
   // Shared between `vite` (dev) and `vite preview` (production-build serve, used
-  // in CI/E2E) so the live test suite still resolves /api → :8080. /fonts is
+  // in CI/E2E) so the live test suite still resolves /api → the backend. /fonts is
   // deliberately absent: the stubbed suite runs backend-free and proxying font
   // requests would turn a static 404 into a connection error.
   const backendProxyConfig =

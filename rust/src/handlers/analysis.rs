@@ -43,11 +43,8 @@ fn basic_info(
 ) -> AppResult<Json<Value>> {
     let file_size = uploads.first().map(|u| u.bytes.len()).unwrap_or(0);
     let document = load_pdf(uploads)?;
-    let version = if document.version.is_empty() {
-        "1.7".to_string()
-    } else {
-        document.version.clone()
-    };
+    // Java's PDDocument.getVersion() is a float; the API returns a JSON number.
+    let version = document.version.parse::<f64>().unwrap_or(1.7);
     Ok(Json(json!({
         "pageCount": pdfdoc::page_ids(&document).len(),
         "pdfVersion": version,
@@ -68,7 +65,9 @@ fn page_dimensions(
     let mut dimensions = Vec::new();
     for page_id in pdfdoc::page_ids(&document) {
         let (width, height) = pdfdoc::page_dimensions(&document, page_id)?;
-        dimensions.push(json!({ "width": width, "height": height }));
+        // Java emits two decimals (595.28), not the raw f32 expansion.
+        let round = |v: f64| (v * 100.0).round() / 100.0;
+        dimensions.push(json!({ "width": round(width), "height": round(height) }));
     }
     Ok(Json(Value::Array(dimensions)))
 }
@@ -161,9 +160,9 @@ fn annotation_info(
     })))
 }
 
-/// `POST /api/v1/analysis/font-info` → fontCount + fonts. Lists the base
-/// font names referenced by each page's resources (Java lists resource
-/// keys; names are the lopdf-level equivalent).
+/// `POST /api/v1/analysis/font-info` → fontCount + fonts. Lists the font
+/// resource names of each page's `/Resources/Font` dictionary, like Java's
+/// `PDResources.getFontNames()`.
 #[stirling_macros::endpoint]
 fn font_info(
     _state: AppState,
@@ -211,4 +210,201 @@ fn security_info(
             "preventModifyAnnotations": permissions & 0b100000 == 0,
         },
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit;
+    use lopdf::{dictionary, Dictionary, Object};
+
+    fn upload(name: &str, bytes: Vec<u8>) -> Vec<Upload> {
+        vec![Upload {
+            name: name.into(),
+            bytes: crate::upload::UploadBytes::from_vec(bytes),
+            content_type: None,
+        }]
+    }
+
+    fn state() -> AppState {
+        AppState::new()
+    }
+
+    #[test]
+    fn page_count_reports_document_pages() {
+        let mut pdf = testkit::Pdf::new();
+        pdf.add_page([0, 0, 300, 400], Dictionary::new());
+        let result = page_count_work(
+            state(),
+            HashMap::new(),
+            upload("in.pdf", pdf.bytes()),
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(result.0["pageCount"], 2);
+    }
+
+    #[test]
+    fn basic_info_includes_version_and_size() {
+        let bytes = testkit::Pdf::new().bytes();
+        let size = bytes.len();
+        let result =
+            basic_info_work(state(), HashMap::new(), upload("in.pdf", bytes), vec![]).unwrap();
+        assert_eq!(result.0["pageCount"], 1);
+        assert_eq!(result.0["pdfVersion"], 1.7);
+        assert_eq!(result.0["fileSize"], size as u64);
+    }
+
+    #[test]
+    fn page_dimensions_uses_mediabox_in_points() {
+        let result = page_dimensions_work(
+            state(),
+            HashMap::new(),
+            upload("in.pdf", testkit::Pdf::new().bytes()),
+            vec![],
+        )
+        .unwrap();
+        let dims = result.0.as_array().unwrap();
+        assert_eq!(dims.len(), 1);
+        assert_eq!(dims[0]["width"], 612.0);
+        assert_eq!(dims[0]["height"], 792.0);
+    }
+
+    #[test]
+    fn document_properties_reads_info_dict() {
+        let mut pdf = testkit::Pdf::new();
+        pdf.set_info(dictionary! {
+            "Title" => Object::string_literal("My Doc"),
+            "Author" => Object::string_literal("Agent"),
+        });
+        let result = document_properties_work(
+            state(),
+            HashMap::new(),
+            upload("in.pdf", pdf.bytes()),
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(result.0["title"], "My Doc");
+        assert_eq!(result.0["author"], "Agent");
+        // Absent keys are JSON null, not missing.
+        assert!(result.0["subject"].is_null());
+        assert!(result.0.get("keywords").is_some());
+    }
+
+    #[test]
+    fn form_fields_counts_widgets() {
+        let mut pdf = testkit::Pdf::new();
+        let widget = pdf.add(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Widget",
+            "FT" => "Tx",
+            "T" => Object::string_literal("field1"),
+            "Rect" => Object::Array(vec![0.into(), 0.into(), 100.into(), 20.into()]),
+        });
+        pdf.edit_page(|page| {
+            page.set("Annots", Object::Array(vec![Object::Reference(widget)]));
+        });
+        let result = form_fields_work(
+            state(),
+            HashMap::new(),
+            upload("form.pdf", pdf.bytes()),
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(result.0["fieldCount"], 1);
+        assert_eq!(result.0["hasXFA"], false);
+        assert_eq!(result.0["isSignaturesExist"], false);
+    }
+
+    #[test]
+    fn annotation_info_breaks_down_by_subtype() {
+        let mut pdf = testkit::Pdf::new();
+        for subtype in ["Text", "Text", "Link"] {
+            let id = pdf.add(dictionary! {
+                "Type" => "Annot",
+                "Subtype" => subtype,
+                "Rect" => Object::Array(vec![0.into(), 0.into(), 10.into(), 10.into()]),
+            });
+            pdf.edit_page(|page| {
+                let mut annots = page
+                    .get(b"Annots")
+                    .ok()
+                    .and_then(|o| match o {
+                        Object::Array(a) => Some(a.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                annots.push(Object::Reference(id));
+                page.set("Annots", Object::Array(annots));
+            });
+        }
+        let result = annotation_info_work(
+            state(),
+            HashMap::new(),
+            upload("in.pdf", pdf.bytes()),
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(result.0["totalCount"], 3);
+        assert_eq!(result.0["typeBreakdown"]["Text"], 2);
+        assert_eq!(result.0["typeBreakdown"]["Link"], 1);
+    }
+
+    #[test]
+    fn font_info_lists_resource_font_names() {
+        let mut pdf = testkit::Pdf::new();
+        pdf.edit_page(|page| {
+            page.set(
+                "Resources",
+                dictionary! {
+                    "Font" => dictionary! {
+                        "F1" => dictionary! {
+                            "Type" => "Font",
+                            "Subtype" => "Type1",
+                            "BaseFont" => "Helvetica",
+                        },
+                    },
+                },
+            );
+        });
+        let result = font_info_work(
+            state(),
+            HashMap::new(),
+            upload("in.pdf", pdf.bytes()),
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(result.0["fontCount"], 1);
+        assert_eq!(result.0["fonts"], serde_json::json!(["F1"]));
+    }
+
+    #[test]
+    fn security_info_reports_unencrypted() {
+        let result = security_info_work(
+            state(),
+            HashMap::new(),
+            upload("in.pdf", testkit::Pdf::new().bytes()),
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(result.0["isEncrypted"], false);
+    }
+
+    #[test]
+    fn missing_upload_is_a_bad_request() {
+        let err = page_count_work(state(), HashMap::new(), vec![], vec![]).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn malformed_pdf_is_an_error_not_a_panic() {
+        let err = page_count_work(
+            state(),
+            HashMap::new(),
+            upload("bad.pdf", b"not a pdf".to_vec()),
+            vec![],
+        )
+        .unwrap_err();
+        assert!(matches!(err, AppError::Pdf(_) | AppError::BadRequest(_)));
+    }
 }

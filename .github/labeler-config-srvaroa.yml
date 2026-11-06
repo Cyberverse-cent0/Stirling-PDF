@@ -141,7 +141,7 @@ labels:
       - 'scripts/installFonts.sh'
       - 'test.sh'
       - 'test2.sh'
-      - 'docker/**'
+      - 'runtime/docker/**'
 
   - label: 'Devtools'
     files:

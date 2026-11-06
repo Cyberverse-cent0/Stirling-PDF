@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::Semaphore;
 
+use crate::agents::pdf_edit::PdfEditAgent;
 use crate::config::{AppSettings, SharedSettings};
 use crate::documents::embedder::{resolve_embedder, EmbeddingService, DEFAULT_EMBED_BATCH_SIZE};
 use crate::documents::pgvector_store::PgVectorStore;
@@ -10,6 +11,7 @@ use crate::documents::sqlite_vec_store::SqliteVecStore;
 use crate::documents::store::DocumentStore;
 use crate::llm::client::LlmClient;
 use crate::llm::model::resolve_model;
+use crate::services::operation_shortlist::OperationShortlist;
 
 /// Shared application state. Grows as runtime pieces (model clients, agents)
 /// are ported; config push swaps the settings behind an `RwLock`.
@@ -23,6 +25,9 @@ pub struct AppState {
     /// and process resources, which the tiers share (Python `ConcurrencyLimitedModel`).
     pub model_semaphore: Arc<Semaphore>,
     pub http: reqwest::Client,
+    /// Shared catalogue-embedding cache for the pdf-edit planner.
+    pub operation_shortlist: Arc<OperationShortlist>,
+    pub pdf_edit: PdfEditAgent,
 }
 
 impl AppState {
@@ -71,13 +76,24 @@ impl AppState {
             settings.smart_model_max_tokens,
         );
 
+        let settings = Arc::new(settings);
+        let operation_shortlist = Arc::new(OperationShortlist::new(documents.clone()));
+        let pdf_edit = PdfEditAgent::new(
+            smart_model.clone(),
+            settings.chat_provider.clone(),
+            settings.clone(),
+            operation_shortlist.clone(),
+        );
+
         Ok(Self {
-            settings: Arc::new(settings),
+            settings,
             documents,
             fast_model,
             smart_model,
             model_semaphore,
             http,
+            operation_shortlist,
+            pdf_edit,
         })
     }
 }

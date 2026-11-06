@@ -22,12 +22,12 @@ updates:
   - package-ecosystem: "docker"
     directories:
       - "/" # Location of Dockerfile
-      - "/docker/backend"
-      - "/docker/embedded"
-      - "/docker/frontend"
-      - "/docker/base"
-      - "/docker/engine"
-      - "/docker/unoserver"
+      - "/runtime/docker/backend"
+      - "/runtime/docker/embedded"
+      - "/runtime/docker/frontend"
+      - "/runtime/docker/base"
+      - "/runtime/docker/engine"
+      - "/runtime/docker/unoserver"
       - "/engine"
     schedule:
       interval: "weekly"
@@ -61,7 +61,7 @@ updates:
       - /.github/scripts
       - /devTools
       - /frontend
-      - /testing/compose/mcp-client-check
+      - /runtime/testing/compose/mcp-client-check
     schedule:
       interval: "weekly"
     cooldown:

@@ -76,6 +76,9 @@ fn merge_pdfs(
         let all: Vec<usize> = (0..pdfdoc::page_ids(&item.document).len()).collect();
         pdfdoc::import_pages(&mut merged, &mut item.document, &all)?;
     }
+    if let Some(first) = loaded.first() {
+        pdfdoc::import_info(&mut merged, &first.document)?;
+    }
     let bytes = pdfdoc::save(&mut merged)?;
 
     let first = loaded.first().map(|l| l.name.as_str());
@@ -85,7 +88,7 @@ fn merge_pdfs(
 }
 
 /// Spring's boolean conversion accepts the usual truthy/falsy spellings.
-fn parse_bool(value: &str, field: &str) -> AppResult<bool> {
+pub(crate) fn parse_bool(value: &str, field: &str) -> AppResult<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "true" | "1" | "on" | "yes" => Ok(true),
         "false" | "0" | "off" | "no" => Ok(false),
@@ -161,4 +164,132 @@ fn sort_date(document: &Document) -> Option<String> {
 
 fn metadata(document: &Document, key: &str) -> Option<String> {
     pdfdoc::info_value(document, key).filter(|v| !v.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit;
+
+    fn upload(name: &str, bytes: Vec<u8>) -> Upload {
+        Upload {
+            name: name.into(),
+            bytes: crate::upload::UploadBytes::from_vec(bytes),
+            content_type: None,
+        }
+    }
+
+    fn loaded(name: &str, pages: usize) -> Loaded {
+        let mut pdf = testkit::Pdf::new();
+        for _ in 1..pages {
+            pdf.add_page([0, 0, 612, 792], lopdf::Dictionary::new());
+        }
+        Loaded {
+            name: name.into(),
+            document: pdfdoc::load(name, &pdf.bytes()).unwrap(),
+        }
+    }
+
+    #[test]
+    fn parse_bool_accepts_spring_spellings() {
+        for v in ["true", "1", "on", "yes", " TRUE "] {
+            assert!(parse_bool(v, "f").unwrap(), "{v}");
+        }
+        for v in ["false", "0", "off", "no"] {
+            assert!(!parse_bool(v, "f").unwrap(), "{v}");
+        }
+        assert!(parse_bool("maybe", "f").is_err());
+        assert!(parse_bool("", "f").is_err());
+    }
+
+    #[test]
+    fn file_order_sorts_by_listed_names() {
+        let mut files = vec![loaded("a.pdf", 1), loaded("b.pdf", 1), loaded("c.pdf", 1)];
+        sort_uploads(&mut files, "orderProvided", Some("c.pdf\nb.pdf"));
+        let names: Vec<&str> = files.iter().map(|l| l.name.as_str()).collect();
+        // Listed names come first in order; unlisted keep relative order.
+        assert_eq!(names, vec!["c.pdf", "b.pdf", "a.pdf"]);
+    }
+
+    #[test]
+    fn by_file_name_sorts_case_insensitively() {
+        let mut files = vec![loaded("B.pdf", 1), loaded("a.pdf", 1)];
+        sort_uploads(&mut files, "byFileName", None);
+        let names: Vec<&str> = files.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, vec!["a.pdf", "B.pdf"]);
+    }
+
+    #[test]
+    fn nulls_sort_last_for_title_and_dates() {
+        assert_eq!(cmp_nulls_last(None, Some("x")), std::cmp::Ordering::Greater);
+        assert_eq!(cmp_nulls_last(Some("x"), None), std::cmp::Ordering::Less);
+        assert_eq!(cmp_nulls_last(None, None), std::cmp::Ordering::Equal);
+        assert_eq!(
+            cmp_nulls_last(Some("B"), Some("a")),
+            std::cmp::Ordering::Greater // case-insensitive: "b" > "a"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_combines_pages_in_upload_order() {
+        let mut a = testkit::Pdf::new();
+        let mut b = testkit::Pdf::new();
+        b.add_page([0, 0, 500, 500], lopdf::Dictionary::new());
+
+        let response = merge_pdfs_work(
+            AppState::new(),
+            HashMap::new(),
+            vec![upload("a.pdf", a.bytes()), upload("b.pdf", b.bytes())],
+            vec![],
+        )
+        .unwrap();
+        let doc = testkit::response_document(response).await;
+        // `Pdf::new()` starts with one page: a=1, b=2 → 3 merged.
+        assert_eq!(pdfdoc::page_ids(&doc).len(), 3);
+    }
+
+    #[test]
+    fn merge_rejects_unsupported_options() {
+        let bytes = testkit::Pdf::new().bytes();
+        for (params, needle) in [
+            (vec![("generateToc".into(), "true".into())], "generateToc"),
+            (
+                vec![("removeCertSign".into(), "false".into())],
+                "removeCertSign",
+            ),
+        ] {
+            let err = merge_pdfs_work(
+                AppState::new(),
+                HashMap::new(),
+                vec![upload("a.pdf", bytes.clone())],
+                params,
+            )
+            .unwrap_err();
+            match err {
+                AppError::BadRequest(m) => assert!(m.contains(needle), "{m}"),
+                other => panic!("expected BadRequest, got {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn merge_rejects_empty_upload_list() {
+        let err = merge_pdfs_work(AppState::new(), HashMap::new(), vec![], vec![]).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn pdf_response_sets_attachment_headers() {
+        let res = pdf_response(b"%PDF-1.7".to_vec(), "out_merged_unsigned.pdf");
+        assert_eq!(
+            res.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            "application/pdf"
+        );
+        assert_eq!(
+            res.headers()
+                .get(axum::http::header::CONTENT_DISPOSITION)
+                .unwrap(),
+            "attachment; filename=\"out_merged_unsigned.pdf\""
+        );
+    }
 }

@@ -1,3 +1,14 @@
+pub mod chunked_mapper;
+pub mod chunked_reasoner;
+pub mod contradiction;
 pub mod document_classifier;
+pub mod math_presentation;
+pub mod output_mode;
+pub mod page_text;
 pub mod pdf_comment;
+pub mod pdf_edit;
+pub mod pdf_questions;
+pub mod pdf_review;
 pub mod runtime;
+pub mod structured;
+pub mod whole_doc_reader;

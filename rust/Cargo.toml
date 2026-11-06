@@ -1,5 +1,10 @@
+[workspace]
+members = [".", "macros", "cli"]
+exclude = ["engine"]
+
 [package]
 name = "stirling-server"
+default-run = "stirling-server"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
@@ -8,23 +13,45 @@ description = "Rust backend for Stirling PDF (strangler migration alongside the 
 [dependencies]
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "compression-br", "compression-deflate"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yml = "0.0.13"
+base64 = "0.22"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "2"
 stirling-macros = { path = "macros" }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "multipart", "blocking"] }
 http-body-util = "0.1"
 futures-util = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
 bytes = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 lopdf = "0.47.0"
-image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp", "tiff", "pnm", "hdr", "tga", "dds", "exr", "ico", "qoi", "ff"] }
 tempfile = "3.27.0"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+chrono-tz = "0.10.4"
+iana-time-zone = "0.1.65"
+rand = "0.10"
+comrak = { version = "0.59", default-features = false }
+qrcode = { version = "0.14.1", default-features = false }
+rqrr = "0.11.0"
+mail-parser = "1.0.1"
+unicode-normalization = "0.1.24"
+ammonia = "4.2.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
+regex = "1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.release]
 lto = true
 codegen-units = 1
+strip = "symbols"

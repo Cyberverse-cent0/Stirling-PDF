@@ -5,6 +5,7 @@
 
 use serde_json::Value;
 
+use crate::agents::output_mode::structured_output_retries;
 use crate::contracts::pdf_comments::{
     PdfCommentInstruction, PdfCommentRequest, PdfCommentResponse, MAX_COMMENT_TEXT_LENGTH,
 };
@@ -55,16 +56,6 @@ const OUTPUT_SCHEMA: &str = r#"{
   "additionalProperties": false
 }"#;
 
-/// pydantic-ai output retries: 1 for native structured output, 6 when the
-/// provider needs tool-delivered output (ollama/custom).
-fn output_retries(chat_provider: &str) -> usize {
-    if matches!(chat_provider, "ollama" | "custom") {
-        6
-    } else {
-        1
-    }
-}
-
 /// JSON-encode user/chunk text so quotes, newlines, or delimiters in
 /// attacker-influenced content cannot break out of the prompt structure.
 fn json_str(s: &str) -> String {
@@ -91,7 +82,7 @@ fn build_prompt(request: &PdfCommentRequest) -> String {
         ));
     }
     lines.push(String::new());
-    lines.push(language_directive().to_string());
+    lines.push(language_directive());
     lines.join("\n")
 }
 
@@ -217,7 +208,7 @@ pub async fn generate(
 
     // Validation happens after the wire call, so retry the whole call on
     // schema-level violations — the same budget pydantic-ai gets.
-    let retries = output_retries(chat_provider);
+    let retries = structured_output_retries(chat_provider);
     let mut output = None;
     for attempt in 0..=retries {
         let value = client

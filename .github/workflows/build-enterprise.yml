@@ -2,7 +2,7 @@ name: Enterprise E2E (Playwright)
 
 # Enterprise Playwright suite — exercises premium-key gated features (audit,
 # teams, analytics) plus full OAuth + SAML logins via the Keycloak compose
-# stacks under testing/compose. Slow and secret-gated, so it runs in four
+# stacks under runtime/testing/compose. Slow and secret-gated, so it runs in four
 # situations:
 #
 #   - PRs that touch proprietary / premium / SSO compose / enterprise tests
@@ -148,10 +148,10 @@ jobs:
 
       # ───────── OAuth round-trip ─────────
       - name: Bring up Keycloak (OAuth realm)
-        working-directory: testing/compose
+        working-directory: runtime/testing/compose
         run: docker compose -f docker-compose-keycloak-oauth.yml up -d --no-deps keycloak-oauth-db keycloak-oauth
       - name: Wait for Keycloak (OAuth) ready
-        working-directory: testing/compose
+        working-directory: runtime/testing/compose
         run: |
           for i in $(seq 1 60); do
             bash validate-oauth-test.sh 2>/dev/null && exit 0 || true
@@ -191,14 +191,14 @@ jobs:
         run: |
           source /tmp/helpers.sh
           stop_backend
-          (cd testing/compose && docker compose -f docker-compose-keycloak-oauth.yml down -v)
+          (cd runtime/testing/compose && docker compose -f docker-compose-keycloak-oauth.yml down -v)
 
       # ───────── SAML round-trip ─────────
       - name: Bring up Keycloak (SAML realm)
-        working-directory: testing/compose
+        working-directory: runtime/testing/compose
         run: docker compose -f docker-compose-keycloak-saml.yml up -d --no-deps keycloak-saml-db keycloak-saml
       - name: Wait for Keycloak (SAML) ready
-        working-directory: testing/compose
+        working-directory: runtime/testing/compose
         run: |
           for i in $(seq 1 60); do
             curl -fsS http://localhost:9080/realms/stirling-saml >/dev/null 2>&1 && exit 0
@@ -210,7 +210,7 @@ jobs:
         # The .pem/.crt/.key files are gitignored (test-only certs); the
         # docker-based start-saml-test.sh generates them at runtime, so do
         # the same in CI before bootRun reads them.
-        working-directory: testing/compose
+        working-directory: runtime/testing/compose
         run: |
           openssl req -x509 -newkey rsa:2048 \
             -keyout saml-private-key.key \
@@ -242,9 +242,9 @@ jobs:
           SECURITY_SAML2_IDP_METADATAURI: "http://localhost:9080/realms/stirling-saml/protocol/saml/descriptor"
           SECURITY_SAML2_IDPSINGLELOGINURL: "http://localhost:9080/realms/stirling-saml/protocol/saml"
           SECURITY_SAML2_IDPSINGLELOGOUTURL: "http://localhost:9080/realms/stirling-saml/protocol/saml"
-          SECURITY_SAML2_IDP_CERT: "${{ github.workspace }}/testing/compose/keycloak-saml-cert.pem"
-          SECURITY_SAML2_PRIVATEKEY: "${{ github.workspace }}/testing/compose/saml-private-key.key"
-          SECURITY_SAML2_SP_CERT: "${{ github.workspace }}/testing/compose/saml-public-cert.crt"
+          SECURITY_SAML2_IDP_CERT: "${{ github.workspace }}/runtime/testing/compose/keycloak-saml-cert.pem"
+          SECURITY_SAML2_PRIVATEKEY: "${{ github.workspace }}/runtime/testing/compose/saml-private-key.key"
+          SECURITY_SAML2_SP_CERT: "${{ github.workspace }}/runtime/testing/compose/saml-public-cert.crt"
           # Realm registers the SP entity as the metadata URL — see
           # keycloak-realm-saml.json `clientId`. Match it here so Keycloak
           # accepts the AuthnRequest issuer.
@@ -266,7 +266,7 @@ jobs:
         run: |
           source /tmp/helpers.sh
           stop_backend
-          (cd testing/compose && docker compose -f docker-compose-keycloak-saml.yml down -v)
+          (cd runtime/testing/compose && docker compose -f docker-compose-keycloak-saml.yml down -v)
 
       # ───────── License-gated feature tests (no IdP needed) ─────────
       - name: Wipe DB so InitialSecuritySetup re-runs with admin/adminadmin
@@ -376,10 +376,10 @@ jobs:
         run: |
           uv sync --project engine --locked --group cucumber
       - name: Build the multi-node image
-        working-directory: testing/compose
+        working-directory: runtime/testing/compose
         run: docker compose $MN_FILES build
       - name: Bring up the cluster and wait for both nodes healthy
-        working-directory: testing/compose
+        working-directory: runtime/testing/compose
         run: |
           docker compose $MN_FILES up -d
           for i in $(seq 1 90); do
@@ -392,7 +392,7 @@ jobs:
           docker compose $MN_FILES logs --tail=200 stirling-1 stirling-2
           exit 1
       - name: Seed the cluster (teams, users, S3 connection, policy)
-        working-directory: testing/compose
+        working-directory: runtime/testing/compose
         run: docker compose $MN_FILES --profile seed run --rm seed
       - name: Run multi-node regression (implemented guarantees)
         working-directory: testing/cucumber
@@ -403,9 +403,9 @@ jobs:
         run: uv run --project ../../engine --locked --group cucumber python -m behave features/multinode -e "features/enterprise" --tags="@destructive ~@known_gap" --no-capture -f plain
       - name: Dump node logs on failure
         if: failure()
-        working-directory: testing/compose
+        working-directory: runtime/testing/compose
         run: docker compose $MN_FILES logs --tail=400 stirling-1 stirling-2
       - name: Tear down
         if: always()
-        working-directory: testing/compose
+        working-directory: runtime/testing/compose
         run: docker compose $MN_FILES --profile seed down -v --remove-orphans

@@ -67,8 +67,9 @@ pub async fn engine_auth(
     next.run(req).await
 }
 
-/// Port of `UserIdMiddleware`: stash `X-User-Id` in request extensions so
-/// handlers and the tenancy gate can read it without re-parsing headers.
+/// Port of `UserIdMiddleware`: stash `X-User-Id` in request extensions and
+/// bind it as the request-scoped principal (the Python contextvar) so agent
+/// internals can call `services::tracking::require_current_user_id`.
 pub async fn user_id(req: Request, next: Next) -> Response {
     let user_id = req
         .headers()
@@ -76,10 +77,10 @@ pub async fn user_id(req: Request, next: Next) -> Response {
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
     let mut req = req;
-    if let Some(id) = user_id {
+    if let Some(id) = user_id.clone() {
         req.extensions_mut().insert(RequestUserId(id));
     }
-    next.run(req).await
+    crate::services::tracking::scoped(user_id, next.run(req)).await
 }
 
 /// Extractor/guard equivalent of `require_user_id`: 401 when `X-User-Id` is absent.

@@ -1,0 +1,22 @@
+[package]
+name = "stirling-utils"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+path = "lib.rs"
+
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+all = "deny"
+
+[dependencies]
+base64 = "0.23"
+crc32fast = "1"
+indexmap = "2"
+md-5 = "0.11"
+sha1 = "0.11"
+sha2 = "0.11"

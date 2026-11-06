@@ -6,7 +6,7 @@
 //! replaces the vendored sqlite-vec `vec0` extension, which was never
 //! configured with an ANN index and so performed the same brute-force scan.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,6 +28,21 @@ const WAL_RETRY_DELAY: Duration = Duration::from_millis(100);
 const SQLITE_DATETIME_FMT: &str = "%Y-%m-%d %H:%M:%S";
 /// Keeps document-hydration `IN` clauses under SQLite's bound-parameter cap.
 const DOC_FETCH_CHUNK: usize = 400;
+/// Aggregate decoded-vector cache budget; `STIRLING_DOCUMENTS_CACHE_MB`
+/// overrides (mebibytes).
+const DEFAULT_CACHE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+const CACHE_BUDGET_ENV: &str = "STIRLING_DOCUMENTS_CACHE_MB";
+/// Unlocked snapshot scans retried before falling back to holding the
+/// connection lock for the scan itself.
+const MAX_SNAPSHOT_RETRIES: usize = 3;
+
+fn cache_budget_bytes() -> usize {
+    std::env::var(CACHE_BUDGET_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map(|mb| mb.saturating_mul(1024 * 1024))
+        .unwrap_or(DEFAULT_CACHE_BUDGET_BYTES)
+}
 
 fn to_sqlite_utc(dt: Option<DateTime<FixedOffset>>) -> Option<String> {
     dt.map(|d| {
@@ -38,12 +53,22 @@ fn to_sqlite_utc(dt: Option<DateTime<FixedOffset>>) -> Option<String> {
     })
 }
 
+/// Sum of squares accumulates in f64: f32 overflow turns large-but-valid
+/// embeddings into an infinite norm and silently zeroes them (Python summed
+/// in float64).
 fn normalize(vector: &[f32]) -> Vec<f32> {
-    let norm = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm = vector
+        .iter()
+        .map(|x| f64::from(*x) * f64::from(*x))
+        .sum::<f64>()
+        .sqrt();
     if norm == 0.0 {
         return vector.to_vec();
     }
-    vector.iter().map(|x| x / norm).collect()
+    vector
+        .iter()
+        .map(|x| (f64::from(*x) / norm) as f32)
+        .collect()
 }
 
 /// Embeddings persist as little-endian f32 blobs.
@@ -79,6 +104,150 @@ struct VecIndex {
     data: Vec<f32>,
 }
 
+impl VecIndex {
+    /// Payload bytes accounted against the cache budget (Vec headers and
+    /// HashMap overhead excluded — they are noise next to the matrices).
+    fn bytes(&self) -> usize {
+        self.rowids.len() * std::mem::size_of::<i64>()
+            + self.data.len() * std::mem::size_of::<f32>()
+    }
+}
+
+/// LRU cache of decoded vector matrices under a byte budget. `lru` holds
+/// keys oldest-first; hits and inserts move the key to the back.
+struct VecCache {
+    map: HashMap<String, Arc<VecIndex>>,
+    lru: VecDeque<String>,
+    bytes: usize,
+    budget: usize,
+}
+
+impl VecCache {
+    fn new(budget: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            lru: VecDeque::new(),
+            bytes: 0,
+            budget,
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<Arc<VecIndex>> {
+        let index = Arc::clone(self.map.get(key)?);
+        if let Some(pos) = self.lru.iter().position(|k| k == key) {
+            let k = self.lru.remove(pos).expect("position came from iter");
+            self.lru.push_back(k);
+        }
+        Some(index)
+    }
+
+    fn insert(&mut self, key: String, index: Arc<VecIndex>) {
+        self.remove(&key);
+        self.bytes += index.bytes();
+        self.map.insert(key.clone(), index);
+        self.lru.push_back(key);
+        // Always keep the newest entry: a collection larger than the whole
+        // budget would otherwise re-decode on every search.
+        while self.bytes > self.budget && self.lru.len() > 1 {
+            let victim = self.lru.pop_front().expect("len checked above");
+            if let Some(evicted) = self.map.remove(&victim) {
+                self.bytes -= evicted.bytes();
+            }
+        }
+    }
+
+    fn remove(&mut self, key: &str) {
+        if let Some(old) = self.map.remove(key) {
+            self.bytes -= old.bytes();
+            if let Some(pos) = self.lru.iter().position(|k| k == key) {
+                self.lru.remove(pos);
+            }
+        }
+    }
+}
+
+/// Top-k `(rowid, score)` pairs for a decoded index. Stored and query
+/// vectors are normalized, so the dot product is the cosine similarity,
+/// clamped at 0 like the previous MATCH query. Chunk rows per worker: one
+/// rayon task per row would drown the scan in scheduling overhead.
+fn scan_top_k(index: &VecIndex, normalized_query: &[f32], top_k: usize) -> Vec<(i64, f32)> {
+    let n = index.rowids.len();
+    let k = top_k.min(n);
+    if k == 0 {
+        return Vec::new();
+    }
+    let dim = index.dim;
+    let chunk_rows = n.div_ceil(rayon::current_num_threads() * 16).max(1);
+    let mut scores = vec![0.0f32; n];
+    scores
+        .par_chunks_mut(chunk_rows)
+        .enumerate()
+        .for_each(|(chunk_idx, out)| {
+            let start = chunk_idx * chunk_rows;
+            for (off, slot) in out.iter_mut().enumerate() {
+                let row = &index.data[(start + off) * dim..(start + off + 1) * dim];
+                *slot = dot(row, normalized_query).max(0.0);
+            }
+        });
+    let mut order: Vec<usize> = (0..n).collect();
+    order.select_nth_unstable_by(k - 1, |&a, &b| {
+        scores[b]
+            .total_cmp(&scores[a])
+            .then(index.rowids[a].cmp(&index.rowids[b]))
+    });
+    let mut top: Vec<(i64, f32)> = order[..k]
+        .iter()
+        .map(|&i| (index.rowids[i], scores[i]))
+        .collect();
+    top.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    top
+}
+
+/// Hydrate the winning rowids into `SearchResult`s. `documents` can be
+/// wide, so only the top-k rows are pulled through the `IN` clauses.
+fn hydrate(
+    conn: &Connection,
+    collection: &str,
+    owner_id: &str,
+    top: Vec<(i64, f32)>,
+) -> anyhow::Result<Vec<SearchResult>> {
+    let mut by_rowid: HashMap<i64, (String, String, String)> = HashMap::new();
+    let rowids: Vec<i64> = top.iter().map(|(r, _)| *r).collect();
+    for chunk in rowids.chunks(DOC_FETCH_CHUNK) {
+        let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT vec_rowid, id, text, metadata FROM documents
+             WHERE collection = ? AND owner_id = ? AND vec_rowid IN ({placeholders})"
+        ))?;
+        let mut sql_params: Vec<&dyn ToSql> = vec![&collection, &owner_id];
+        sql_params.extend(chunk.iter().map(|r| r as &dyn ToSql));
+        let rows = stmt.query_map(sql_params.as_slice(), |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (vec_rowid, id, text, metadata) = row?;
+            by_rowid.insert(vec_rowid, (id, text, metadata));
+        }
+    }
+    let mut out = Vec::with_capacity(top.len());
+    for (rowid, score) in top {
+        if let Some((id, text, metadata)) = by_rowid.remove(&rowid) {
+            let metadata: HashMap<String, String> =
+                serde_json::from_str(&metadata).unwrap_or_default();
+            out.push(SearchResult {
+                document: Document { id, text, metadata },
+                score: f64::from(score),
+            });
+        }
+    }
+    Ok(out)
+}
+
 fn sanitize_table_name(collection: &str, owner_id: &str) -> String {
     let clean = |s: &str| {
         s.chars()
@@ -92,6 +261,15 @@ fn sanitize_table_name(collection: &str, owner_id: &str) -> String {
             .collect::<String>()
     };
     format!("vec_{}_{}", clean(owner_id), clean(collection))
+}
+
+fn fnv1a64(s: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for b in s.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn enable_wal(conn: &Connection) {
@@ -119,12 +297,17 @@ pub struct SqliteVecStore {
     /// `std::sync::Mutex`, not tokio: guards are only taken while the
     /// connection lock is held, where an `.await` would make the future
     /// `!Send` (`rusqlite::Connection` is not `Sync`).
-    vec_index: std::sync::Mutex<HashMap<String, Arc<VecIndex>>>,
+    vec_cache: std::sync::Mutex<VecCache>,
     db_path: Option<PathBuf>,
 }
 
 impl SqliteVecStore {
     pub fn open(db_path: &Path) -> anyhow::Result<Self> {
+        Self::open_with_budget(db_path, cache_budget_bytes())
+    }
+
+    /// `open` with an explicit decoded-cache budget in bytes.
+    pub fn open_with_budget(db_path: &Path, cache_budget: usize) -> anyhow::Result<Self> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -135,19 +318,25 @@ impl SqliteVecStore {
         Self::init_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
-            vec_index: std::sync::Mutex::new(HashMap::new()),
+            vec_cache: std::sync::Mutex::new(VecCache::new(cache_budget)),
             db_path: Some(db_path.to_path_buf()),
         })
     }
 
     /// In-memory store for tests (`:memory:` in Python).
     pub fn ephemeral() -> anyhow::Result<Self> {
+        Self::ephemeral_with_budget(DEFAULT_CACHE_BUDGET_BYTES)
+    }
+
+    /// In-memory store with an explicit decoded-cache budget (tests and
+    /// benchmarks).
+    pub fn ephemeral_with_budget(cache_budget: usize) -> anyhow::Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys=ON")?;
         Self::init_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
-            vec_index: std::sync::Mutex::new(HashMap::new()),
+            vec_cache: std::sync::Mutex::new(VecCache::new(cache_budget)),
             db_path: None,
         })
     }
@@ -210,9 +399,12 @@ impl SqliteVecStore {
     }
 
     /// Databases written while the store used the sqlite-vec extension keep
-    /// `vec0` virtual tables this binary can no longer query. Their vectors
-    /// are derived data, so drop the tables and their collection rows; the
-    /// next ingest recreates them as plain blob tables.
+    /// `vec0` virtual tables this binary can no longer query — and cannot even
+    /// `DROP TABLE`, because resolving the module fails at prepare time. Their
+    /// vectors are derived data, so the catalog rows are deleted directly via
+    /// `writable_schema` (shadow tables included); the next ingest recreates
+    /// the collection as a plain blob table. `documents_meta`, pages, ACLs and
+    /// unrelated tables are preserved.
     fn drop_legacy_vec0_tables(conn: &Connection) -> anyhow::Result<()> {
         let vec_tables: Vec<String> = {
             let mut stmt = conn.prepare(
@@ -222,28 +414,56 @@ impl SqliteVecStore {
             let rows = stmt.query_map([], |r| r.get(0))?;
             rows.collect::<Result<_, _>>()?
         };
-        for name in vec_tables {
-            tracing::warn!("dropping legacy vec0 table {name}; collection must be re-ingested");
+        if vec_tables.is_empty() {
+            return Ok(());
+        }
+        // `instr(name, prefix)` is a wildcard-free prefix match for vec0's
+        // shadow tables (`<vtab>_chunks`, `<vtab>_rowids`, `<vtab>_vector_chunksNN`,
+        // ...). Names registered in `collections` are real vector tables, not
+        // shadows, and are never deleted here.
+        conn.execute_batch("PRAGMA writable_schema=ON")?;
+        {
+            let tx = conn.unchecked_transaction()?;
+            for name in &vec_tables {
+                tracing::warn!("dropping legacy vec0 table {name}; collection must be re-ingested");
+                tx.execute(
+                    "DELETE FROM sqlite_master
+                     WHERE name = ?
+                        OR (instr(name, ?) = 1
+                            AND name NOT IN (SELECT table_name FROM collections))",
+                    params![name, format!("{name}_")],
+                )?;
+            }
+            tx.commit()?;
+        }
+        conn.execute_batch("PRAGMA writable_schema=OFF")?;
+        // Bump the schema cookie so this and every other open connection
+        // reparses sqlite_master instead of keeping the vec0 entries cached.
+        let version: i64 = conn.query_row("PRAGMA schema_version", [], |r| r.get(0))?;
+        conn.execute_batch(&format!("PRAGMA schema_version={}", version + 1))?;
+
+        let tx = conn.unchecked_transaction()?;
+        for name in &vec_tables {
             let keys: Vec<(String, String)> = {
-                let mut stmt = conn
+                let mut stmt = tx
                     .prepare("SELECT collection, owner_id FROM collections WHERE table_name = ?")?;
                 let rows = stmt.query_map(params![name], |r| {
                     Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
                 })?;
                 rows.collect::<Result<_, _>>()?
             };
-            conn.execute_batch(&format!("DROP TABLE IF EXISTS {name}"))?;
             for (collection, owner_id) in keys {
-                conn.execute(
+                tx.execute(
                     "DELETE FROM documents WHERE collection = ? AND owner_id = ?",
                     params![collection, owner_id],
                 )?;
-                conn.execute(
+                tx.execute(
                     "DELETE FROM collections WHERE collection = ? AND owner_id = ?",
                     params![collection, owner_id],
                 )?;
             }
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -269,6 +489,27 @@ impl SqliteVecStore {
         Ok(owner)
     }
 
+    fn cache_get(&self, table_name: &str) -> Option<Arc<VecIndex>> {
+        self.vec_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(table_name)
+    }
+
+    fn cache_insert(&self, table_name: &str, index: Arc<VecIndex>) {
+        self.vec_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(table_name.to_string(), index);
+    }
+
+    fn cache_remove(&self, table_name: &str) {
+        self.vec_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(table_name);
+    }
+
     /// Returns the decoded vector matrix for `table_name`, building and
     /// caching it on first use. Caller must hold the connection lock so the
     /// cache cannot go stale mid-read.
@@ -278,13 +519,8 @@ impl SqliteVecStore {
         table_name: &str,
         dim: usize,
     ) -> anyhow::Result<Arc<VecIndex>> {
-        if let Some(index) = self
-            .vec_index
-            .lock()
-            .expect("vec_index poisoned")
-            .get(table_name)
-        {
-            return Ok(Arc::clone(index));
+        if let Some(index) = self.cache_get(table_name) {
+            return Ok(index);
         }
         let mut stmt = conn.prepare(&format!("SELECT rowid, embedding FROM {table_name}"))?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
@@ -307,11 +543,45 @@ impl SqliteVecStore {
             );
         }
         let index = Arc::new(VecIndex { rowids, dim, data });
-        self.vec_index
-            .lock()
-            .expect("vec_index poisoned")
-            .insert(table_name.to_string(), Arc::clone(&index));
+        self.cache_insert(table_name, Arc::clone(&index));
         Ok(index)
+    }
+
+    /// Resolve `(owner_id, table_name, dim)` for a searchable collection, or
+    /// `None` when the caller has no read access or nothing is stored.
+    fn resolve_target(
+        conn: &Connection,
+        collection: &str,
+        query_dim: usize,
+        principals: &[PrincipalId],
+    ) -> anyhow::Result<Option<(String, String, usize)>> {
+        let Some(owner_id) = Self::readable_owner_for(conn, collection, principals)? else {
+            return Ok(None);
+        };
+        let row: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT table_name, dim FROM collections WHERE collection = ? AND owner_id = ?",
+                params![collection, owner_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((table_name, dim)) = row else {
+            return Ok(None);
+        };
+        // Partial-migration leftover: the collections row outlived its table.
+        let table_exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)",
+            params![table_name],
+            |r| r.get(0),
+        )?;
+        if !table_exists {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            query_dim == dim as usize,
+            "Query embedding dim {query_dim} does not match collection dim {dim}"
+        );
+        Ok(Some((owner_id, table_name, dim as usize)))
     }
 }
 
@@ -350,10 +620,7 @@ impl DocumentStore for SqliteVecStore {
             .optional()?;
         if let Some(name) = table_name {
             conn.execute_batch(&format!("DROP TABLE IF EXISTS {name}"))?;
-            self.vec_index
-                .lock()
-                .expect("vec_index poisoned")
-                .remove(&name);
+            self.cache_remove(&name);
         }
         let n = conn.execute(
             "DELETE FROM documents_meta WHERE collection = ? AND owner_id = ?",
@@ -371,12 +638,8 @@ impl DocumentStore for SqliteVecStore {
         };
         for name in &tables {
             conn.execute_batch(&format!("DROP TABLE IF EXISTS {name}"))?;
+            self.cache_remove(name);
         }
-        let mut cache = self.vec_index.lock().expect("vec_index poisoned");
-        for name in &tables {
-            cache.remove(name);
-        }
-        drop(cache);
         let n = conn.execute(
             "DELETE FROM documents_meta WHERE owner_id = ?",
             params![owner_id],
@@ -397,12 +660,8 @@ impl DocumentStore for SqliteVecStore {
         };
         for name in &tables {
             conn.execute_batch(&format!("DROP TABLE IF EXISTS {name}"))?;
+            self.cache_remove(name);
         }
-        let mut cache = self.vec_index.lock().expect("vec_index poisoned");
-        for name in &tables {
-            cache.remove(name);
-        }
-        drop(cache);
         let n = conn.execute(
             "DELETE FROM documents_meta WHERE expires_at IS NOT NULL AND expires_at < datetime('now')",
             [],
@@ -428,6 +687,16 @@ impl DocumentStore for SqliteVecStore {
         }
         let conn = self.conn.lock().await;
         let dim = embeddings[0].len();
+        anyhow::ensure!(dim > 0, "Embeddings must have at least one dimension");
+        // vec0 rejected a wrong-length blob at INSERT; a plain table would
+        // store it and fail every later search on this collection.
+        for emb in embeddings {
+            anyhow::ensure!(
+                emb.len() == dim,
+                "Inconsistent embedding dims in one batch: expected {dim}, got {}",
+                emb.len()
+            );
+        }
         let row: Option<(i64, String)> = conn
             .query_row(
                 "SELECT dim, table_name FROM collections WHERE collection = ? AND owner_id = ?",
@@ -435,9 +704,60 @@ impl DocumentStore for SqliteVecStore {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
+        // A collections row whose vector table is gone is a partial-migration
+        // leftover: its documents.vec_rowid values dangle and could hydrate
+        // the wrong chunk after the table is recreated. Drop the derived rows
+        // so the collection is re-ingested cleanly.
+        let row = match row {
+            Some((dim_val, name)) => {
+                let table_exists: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)",
+                    params![name],
+                    |r| r.get(0),
+                )?;
+                if table_exists {
+                    Some((dim_val, name))
+                } else {
+                    tracing::warn!(
+                        "collections row for {collection}/{owner_id} points at missing table {name}; resetting"
+                    );
+                    conn.execute(
+                        "DELETE FROM documents WHERE collection = ? AND owner_id = ?",
+                        params![collection, owner_id],
+                    )?;
+                    conn.execute(
+                        "DELETE FROM collections WHERE collection = ? AND owner_id = ?",
+                        params![collection, owner_id],
+                    )?;
+                    None
+                }
+            }
+            None => None,
+        };
         let table_name = match row {
             None => {
-                let name = sanitize_table_name(collection, owner_id);
+                // Sanitizing is lossy: "u-1"/"c" and "u_1"/"c" map to the same
+                // name, and sharing one vector table would mix owners' rows.
+                let base = sanitize_table_name(collection, owner_id);
+                let mut name = base.clone();
+                let mut salt = 0u32;
+                loop {
+                    let taken: bool = conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM collections WHERE table_name = ?)
+                            OR EXISTS(SELECT 1 FROM sqlite_master
+                                      WHERE type = 'table' AND name = ?)",
+                        params![name, name],
+                        |r| r.get(0),
+                    )?;
+                    if !taken {
+                        break;
+                    }
+                    salt += 1;
+                    name = format!(
+                        "{base}_{:016x}",
+                        fnv1a64(&format!("{collection}\0{owner_id}\0{salt}"))
+                    );
+                }
                 conn.execute_batch(&format!(
                     "CREATE TABLE IF NOT EXISTS {name}(embedding BLOB NOT NULL)"
                 ))?;
@@ -468,21 +788,23 @@ impl DocumentStore for SqliteVecStore {
             let rows = stmt.query_map(params.as_slice(), |r| r.get(0))?;
             rows.collect::<Result<_, _>>()?
         };
+
+        // Deletes and inserts share one transaction: a crash between them
+        // would orphan vector rows or document rows pointing at nothing.
+        let tx = conn.unchecked_transaction()?;
         if !existing.is_empty() {
             let row_ph = existing.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let mut del_stmt = conn.prepare(&format!(
+            let mut del_stmt = tx.prepare(&format!(
                 "DELETE FROM {table_name} WHERE rowid IN ({row_ph})"
             ))?;
             del_stmt.execute(rusqlite::params_from_iter(existing.iter()))?;
-            let mut del_stmt = conn.prepare(&format!(
+            let mut del_stmt = tx.prepare(&format!(
                 "DELETE FROM documents WHERE collection = ? AND owner_id = ? AND id IN ({placeholders})"
             ))?;
             let mut params: Vec<&dyn rusqlite::ToSql> = vec![&collection, &owner_id];
             params.extend(ids.iter().map(|i| i as &dyn rusqlite::ToSql));
             del_stmt.execute(params.as_slice())?;
         }
-
-        let tx = conn.unchecked_transaction()?;
         for (doc, emb) in documents.iter().zip(embeddings.iter()) {
             let normalized = normalize(emb);
             tx.execute(
@@ -498,10 +820,7 @@ impl DocumentStore for SqliteVecStore {
             )?;
         }
         tx.commit()?;
-        self.vec_index
-            .lock()
-            .expect("vec_index poisoned")
-            .remove(&table_name);
+        self.cache_remove(&table_name);
         Ok(())
     }
 
@@ -571,99 +890,38 @@ impl DocumentStore for SqliteVecStore {
         if principals.is_empty() {
             return Ok(Vec::new());
         }
-        let conn = self.conn.lock().await;
-        let Some(owner_id) = Self::readable_owner_for(&conn, collection, principals)? else {
-            return Ok(Vec::new());
-        };
-        let row: Option<(String, i64)> = conn
-            .query_row(
-                "SELECT table_name, dim FROM collections WHERE collection = ? AND owner_id = ?",
-                params![collection, owner_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let Some((table_name, dim)) = row else {
-            return Ok(Vec::new());
-        };
-        anyhow::ensure!(
-            query_embedding.len() == dim as usize,
-            "Query embedding dim {} does not match collection dim {}",
-            query_embedding.len(),
-            dim
-        );
         let normalized = normalize(query_embedding);
-        let index = self.load_index(&conn, &table_name, dim as usize)?;
-        let n = index.rowids.len();
-        let k = top_k.min(n);
-        if k == 0 {
-            return Ok(Vec::new());
-        }
-        let dim = index.dim;
-        // Stored and query vectors are normalized, so the dot product is the
-        // cosine similarity, clamped at 0 like the previous MATCH query.
-        // Chunk rows per worker: one rayon task per row would drown the scan
-        // in scheduling overhead.
-        let chunk_rows = n.div_ceil(rayon::current_num_threads() * 16).max(1);
-        let mut scores = vec![0.0f32; n];
-        scores
-            .par_chunks_mut(chunk_rows)
-            .enumerate()
-            .for_each(|(chunk_idx, out)| {
-                let start = chunk_idx * chunk_rows;
-                for (off, slot) in out.iter_mut().enumerate() {
-                    let row = &index.data[(start + off) * dim..(start + off + 1) * dim];
-                    *slot = dot(row, &normalized).max(0.0);
-                }
-            });
-        let mut order: Vec<usize> = (0..n).collect();
-        order.select_nth_unstable_by(k - 1, |&a, &b| {
-            scores[b]
-                .total_cmp(&scores[a])
-                .then(index.rowids[a].cmp(&index.rowids[b]))
-        });
-        let mut top: Vec<(i64, f32)> = order[..k]
-            .iter()
-            .map(|&i| (index.rowids[i], scores[i]))
-            .collect();
-        top.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-
-        // Hydrate only the winning rows; `documents` can be wide, so avoid
-        // pulling every text/metadata blob through the scan.
-        let mut by_rowid: HashMap<i64, (String, String, String)> = HashMap::new();
-        let rowids: Vec<i64> = top.iter().map(|(r, _)| *r).collect();
-        for chunk in rowids.chunks(DOC_FETCH_CHUNK) {
-            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let mut stmt = conn.prepare(&format!(
-                "SELECT vec_rowid, id, text, metadata FROM documents
-                 WHERE collection = ? AND owner_id = ? AND vec_rowid IN ({placeholders})"
-            ))?;
-            let mut sql_params: Vec<&dyn ToSql> = vec![&collection, &owner_id];
-            sql_params.extend(chunk.iter().map(|r| r as &dyn ToSql));
-            let rows = stmt.query_map(sql_params.as_slice(), |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                ))
-            })?;
-            for row in rows {
-                let (vec_rowid, id, text, metadata) = row?;
-                by_rowid.insert(vec_rowid, (id, text, metadata));
+        // The scan is pure memory once the index snapshot exists, so it runs
+        // without the connection lock and concurrent searches proceed in
+        // parallel. Every write invalidates the cache entry under the
+        // connection lock, so re-checking that the cached Arc is unchanged
+        // proves the snapshot is still current before hydration.
+        for attempt in 0..=MAX_SNAPSHOT_RETRIES {
+            let conn = self.conn.lock().await;
+            let Some((owner_id, table_name, dim)) =
+                Self::resolve_target(&conn, collection, query_embedding.len(), principals)?
+            else {
+                return Ok(Vec::new());
+            };
+            let index = self.load_index(&conn, &table_name, dim)?;
+            if attempt == MAX_SNAPSHOT_RETRIES {
+                // Sustained write contention: hold the lock for the scan,
+                // exactly like the fully serialized implementation.
+                let top = scan_top_k(&index, &normalized, top_k);
+                return hydrate(&conn, collection, &owner_id, top);
             }
-        }
-        let mut out = Vec::with_capacity(top.len());
-        for (rowid, score) in top {
-            if let Some((id, text, metadata)) = by_rowid.remove(&rowid) {
-                let metadata: HashMap<String, String> =
-                    serde_json::from_str(&metadata).unwrap_or_default();
-                out.push(SearchResult {
-                    document: Document { id, text, metadata },
-                    score: f64::from(score),
-                });
+            drop(conn);
+            let top = scan_top_k(&index, &normalized, top_k);
+            let conn = self.conn.lock().await;
+            if self
+                .cache_get(&table_name)
+                .is_some_and(|current| Arc::ptr_eq(&current, &index))
+            {
+                return hydrate(&conn, collection, &owner_id, top);
             }
+            // The snapshot went stale mid-scan; retry with a fresh index.
         }
-        Ok(out)
+        unreachable!("the final attempt always returns")
     }
 
     async fn read_pages(
@@ -746,12 +1004,11 @@ impl DocumentStore for SqliteVecStore {
     }
 
     async fn close(&self) -> anyhow::Result<()> {
+        // The Connection is owned by the store and drops with it; `close` can
+        // only checkpoint the WAL so the main file is complete on disk.
         let conn = self.conn.lock().await;
-        if let Some(path) = &self.db_path {
+        if self.db_path.is_some() {
             let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
-            drop(conn);
-            // Connection closes when the Mutex guard drops; nothing else to do.
-            let _ = path;
         }
         Ok(())
     }

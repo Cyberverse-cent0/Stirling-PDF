@@ -8,7 +8,7 @@ on:
     paths:
       - .github/workflows/nightly.yml
       - testing/cucumber/**
-      - docker/embedded/compose/test_cicd.yml
+      - runtime/docker/embedded/compose/test_cicd.yml
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -152,7 +152,7 @@ jobs:
           version: 3.54.0
 
       - name: Start the fat image with login and storage enabled
-        run: docker compose -f docker/embedded/compose/test_cicd.yml up -d --build
+        run: docker compose -f runtime/docker/embedded/compose/test_cicd.yml up -d --build
         env:
           MAVEN_USER: ${{ secrets.MAVEN_USER }}
           MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
@@ -177,8 +177,8 @@ jobs:
 
       - name: Container logs on failure
         if: failure()
-        run: docker compose -f docker/embedded/compose/test_cicd.yml logs --tail 400
+        run: docker compose -f runtime/docker/embedded/compose/test_cicd.yml logs --tail 400
 
       - name: Tear down
         if: always()
-        run: docker compose -f docker/embedded/compose/test_cicd.yml down -v
+        run: docker compose -f runtime/docker/embedded/compose/test_cicd.yml down -v

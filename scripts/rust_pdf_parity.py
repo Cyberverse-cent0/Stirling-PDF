@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -65,6 +66,28 @@ CASES = [
         (("bookmarkLevel", "1"), ("includeMetadata", "false")),
     ),
     Case(
+        "general/split-pdf-by-sections",
+        "/api/v1/general/split-pdf-by-sections",
+        "zip",
+        (
+            ("splitMode", "SPLIT_ALL"),
+            ("horizontalDivisions", "1"),
+            ("verticalDivisions", "1"),
+            ("merge", "false"),
+        ),
+    ),
+    Case(
+        "general/split-pdf-by-sections-merge",
+        "/api/v1/general/split-pdf-by-sections",
+        "pdf",
+        (
+            ("splitMode", "SPLIT_ALL"),
+            ("horizontalDivisions", "1"),
+            ("verticalDivisions", "0"),
+            ("merge", "true"),
+        ),
+    ),
+    Case(
         "general/scale-pages-a4",
         "/api/v1/general/scale-pages",
         "pdf",
@@ -116,6 +139,7 @@ CASES = [
             ("grayscale", "false"),
         ),
     ),
+    Case("security/remove-cert-sign", "/api/v1/security/remove-cert-sign", "pdf"),
 ]
 
 KNOWN_DIFFS = [
@@ -189,12 +213,15 @@ def multipart_body(files: list[tuple[str, str, bytes]], fields: list[tuple[str, 
     return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
 
 
-def post_multipart(base: str, path: str, files: list[tuple[str, str, bytes]], fields: list[tuple[str, str]], timeout: float) -> Response:
+def post_multipart(base: str, path: str, files: list[tuple[str, str, bytes]], fields: list[tuple[str, str]], timeout: float, extra_headers: dict[str, str] | None = None) -> Response:
     body, content_type = multipart_body(files, fields)
+    headers = {"Content-Type": content_type, "Accept": "*/*"}
+    if extra_headers:
+        headers.update(extra_headers)
     request = urllib.request.Request(
         base.rstrip("/") + path,
         data=body,
-        headers={"Content-Type": content_type, "Accept": "*/*"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -414,11 +441,11 @@ def compare_bodies(case: Case, java: Response, rust: Response, cache: Fingerprin
     return [], [], "bytes"
 
 
-def run_case(case: Case, input_path: Path, java_url: str, rust_url: str, cache: FingerprintCache, timeout: float) -> Result:
+def run_case(case: Case, input_path: Path, java_url: str, rust_url: str, cache: FingerprintCache, timeout: float, java_headers: dict[str, str] | None = None) -> Result:
     data = input_path.read_bytes()
     files = [(FILE_FIELD, input_path.name, data)]
     fields = list(case.fields)
-    java = post_multipart(java_url, case.path, files, fields, timeout)
+    java = post_multipart(java_url, case.path, files, fields, timeout, java_headers)
     rust = post_multipart(rust_url, case.path, files, fields, timeout)
     result = Result(case.name, input_path.name, java.status, rust.status)
     result.note = f"javaFile={filename(java)} rustFile={filename(rust)}"
@@ -443,7 +470,7 @@ def run_case(case: Case, input_path: Path, java_url: str, rust_url: str, cache: 
     return result
 
 
-def run_merge(inputs: list[Path], java_url: str, rust_url: str, cache: FingerprintCache, timeout: float) -> Result:
+def run_merge(inputs: list[Path], java_url: str, rust_url: str, cache: FingerprintCache, timeout: float, java_headers: dict[str, str] | None = None) -> Result:
     case = next(case for case in CASES if case.name == "general/merge-pdfs")
     first = inputs[0]
     second = inputs[1] if len(inputs) > 1 else inputs[0]
@@ -451,7 +478,7 @@ def run_merge(inputs: list[Path], java_url: str, rust_url: str, cache: Fingerpri
         (FILE_FIELD, first.name, first.read_bytes()),
         (FILE_FIELD, second.name, second.read_bytes()),
     ]
-    java = post_multipart(java_url, case.path, files, list(case.fields), timeout)
+    java = post_multipart(java_url, case.path, files, list(case.fields), timeout, java_headers)
     rust = post_multipart(rust_url, case.path, files, list(case.fields), timeout)
     result = Result(case.name, f"{first.name}+{second.name}", java.status, rust.status)
     if java.status == 0 or rust.status == 0:
@@ -477,6 +504,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Compare migrated Stirling PDF endpoints between Java and Rust.")
     parser.add_argument("--java-url", default=DEFAULT_JAVA)
     parser.add_argument("--rust-url", default=DEFAULT_RUST)
+    parser.add_argument("--java-auth", default=os.environ.get("STIRLING_PARITY_JAVA_AUTH", ""), help="Bearer token for the Java backend (or set STIRLING_PARITY_JAVA_AUTH)")
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--fingerprint", default=DEFAULT_FINGERPRINT)
     parser.add_argument("--build-fingerprint", action="store_true")
@@ -504,15 +532,16 @@ def main() -> int:
 
     binary = ensure_fingerprint(root, args)
     cache = FingerprintCache(binary)
+    java_headers = {"Authorization": f"Bearer {args.java_auth}"} if args.java_auth else None
     results: list[Result] = []
 
     for case in cases:
         if case.files == "pair":
             if inputs:
-                results.append(run_merge(inputs, args.java_url, args.rust_url, cache, args.timeout))
+                results.append(run_merge(inputs, args.java_url, args.rust_url, cache, args.timeout, java_headers))
             continue
         for input_path in inputs:
-            results.append(run_case(case, input_path, args.java_url, args.rust_url, cache, args.timeout))
+            results.append(run_case(case, input_path, args.java_url, args.rust_url, cache, args.timeout, java_headers))
 
     failures = 0
     for result in results:

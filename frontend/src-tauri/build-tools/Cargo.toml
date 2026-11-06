@@ -1,0 +1,10 @@
+[package]
+name = "stirling-desktop-build"
+version = "0.1.0"
+edition = "2021"
+
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+all = "deny"

@@ -98,3 +98,11 @@ tasks:
     cmds:
       - task: engine:lint
       - task: engine:test
+
+  cli:
+    desc: "Run the stirling tooling CLI (doctor, engines, ports, test, ...)"
+    dir: rust
+    vars:
+      CLI_ARGS: '{{.CLI_ARGS | default ""}}'
+    cmds:
+      - cargo run -p stirling -- {{.CLI_ARGS}}

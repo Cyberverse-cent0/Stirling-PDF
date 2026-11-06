@@ -6,8 +6,10 @@ output: prefixed
 dotenv: ['.task/.env.local', '.task/.env']
 
 vars:
-  FIND_FREE_PORT_PS: powershell -NoProfile -File scripts/find-free-port.ps1
-  FIND_FREE_PORT_SH: bash scripts/find-free-port.sh
+  # Rust CLI replaces scripts/run.sh + scripts/find-free-port.sh. cargo run
+  # keeps this working before `stirling` is installed; stdout stays clean.
+  STIRLING: 'cargo run --quiet --manifest-path {{.ROOT_DIR}}/rust/Cargo.toml -p stirling --'
+  FIND_FREE_PORT: '{{.STIRLING}} ports free'
 
 includes:
   backend:
@@ -71,7 +73,7 @@ tasks:
     desc: "Start backend + frontend concurrently on free ports"
     vars:
       PORTS:
-        sh: '{{if eq OS "windows"}}{{.FIND_FREE_PORT_PS}} 8080 5173{{else}}{{.FIND_FREE_PORT_SH}} 8080 5173{{end}}'
+        sh: '{{.FIND_FREE_PORT}} 8080 5173'
       BACKEND_PORT: '{{index (splitList "\n" .PORTS) 0}}'
       FRONTEND_PORT: '{{index (splitList "\n" .PORTS) 1}}'
     deps:
@@ -88,7 +90,7 @@ tasks:
     desc: "Start backend + editor; the portal is an admin route at /portal"
     vars:
       PORTS:
-        sh: '{{if eq OS "windows"}}{{.FIND_FREE_PORT_PS}} 8080 5173{{else}}{{.FIND_FREE_PORT_SH}} 8080 5173{{end}}'
+        sh: '{{.FIND_FREE_PORT}} 8080 5173'
       BACKEND_PORT: '{{index (splitList "\n" .PORTS) 0}}'
       EDITOR_PORT: '{{index (splitList "\n" .PORTS) 1}}'
     deps:
@@ -142,7 +144,7 @@ tasks:
     vars:
       SAAS_ENV: '{{.SAAS_ENV | default "staging"}}'
       PORTS:
-        sh: '{{if eq OS "windows"}}{{.FIND_FREE_PORT_PS}} 8081 5174 8080 5173{{else}}{{.FIND_FREE_PORT_SH}} 8081 5174 8080 5173{{end}}'
+        sh: '{{.FIND_FREE_PORT}} 8081 5174 8080 5173'
       SAAS_BACKEND_PORT: '{{index (splitList "\n" .PORTS) 0}}'
       SAAS_FRONTEND_PORT: '{{index (splitList "\n" .PORTS) 1}}'
       APP_BACKEND_PORT: '{{index (splitList "\n" .PORTS) 2}}'
@@ -220,7 +222,7 @@ tasks:
       # Only meaningful to the saas frontend; every other flavor ignores it.
       SAAS_ENV: '{{.SAAS_ENV | default ""}}'
       PORTS:
-        sh: '{{if eq OS "windows"}}{{.FIND_FREE_PORT_PS}} 8080 5173 5001{{else}}{{.FIND_FREE_PORT_SH}} 8080 5173 5001{{end}}'
+        sh: '{{.FIND_FREE_PORT}} 8080 5173 5001'
       BACKEND_PORT: '{{index (splitList "\n" .PORTS) 0}}'
       FRONTEND_PORT: '{{index (splitList "\n" .PORTS) 1}}'
       ENGINE_PORT: '{{index (splitList "\n" .PORTS) 2}}'
@@ -380,20 +382,21 @@ tasks:
 
   # ============================================================
   # Lifecycle (dev loop: run / restart / stop / status)
-  # Pids + logs live in .run/ via scripts/run.sh. Ports match the fixed
-  # dev defaults so the strangler topology works: browser → Rust :8081,
-  # which proxies unmigrated /api/** to Java :8080.
+  # Pids + logs live in .run/ via `stirling start/stop/status` (same layout
+  # scripts/run.sh used, so both interoperate). Ports match the fixed
+  # dev defaults: Rust :8081 is the standalone backend; the Java backend
+  # stays on scripts/run.sh (:8080) for proprietary/saas dev only.
   # ============================================================
 
   rust:run:
     desc: "Start the Rust backend in the background (:8081)"
     cmds:
-      - bash scripts/run.sh start rust 'cd rust && exec cargo run'
+      - '{{.STIRLING}} start rust --cwd rust -- cargo run -p stirling-server'
 
   rust:stop:
     desc: "Stop the Rust backend"
     cmds:
-      - bash scripts/run.sh stop rust
+      - '{{.STIRLING}} stop rust'
 
   rust:restart:
     desc: "Restart the Rust backend"
@@ -420,12 +423,12 @@ tasks:
   engine:bg:
     desc: "Start the Python engine in the background (:5001)"
     cmds:
-      - bash scripts/run.sh start engine 'cd engine && exec uv run --locked --group engine --group engine-dev uvicorn stirling.api.app:app --host 0.0.0.0 --port {{.PORT | default "5001"}} --reload'
+      - '{{.STIRLING}} start engine --cwd engine -- uv run --locked --group engine --group engine-dev uvicorn stirling.api.app:app --host 0.0.0.0 --port {{.PORT | default "5001"}} --reload'
 
   engine:bg:stop:
     desc: "Stop the Python engine"
     cmds:
-      - bash scripts/run.sh stop engine
+      - '{{.STIRLING}} stop engine'
 
   engine:bg:restart:
     desc: "Restart the Python engine"
@@ -436,12 +439,12 @@ tasks:
   frontend:run:
     desc: "Start the frontend dev server in the background (:5173)"
     cmds:
-      - bash scripts/run.sh start frontend 'cd frontend && exec env BACKEND_URL={{.BACKEND_URL | default "http://localhost:8080"}} npx vite --mode proprietary --port {{.PORT | default "5173"}}'
+      - '{{.STIRLING}} start frontend --cwd frontend --env BACKEND_URL={{.BACKEND_URL | default "http://localhost:8080"}} -- npx vite --mode proprietary --port {{.PORT | default "5173"}}'
 
   frontend:stop:
     desc: "Stop the frontend dev server"
     cmds:
-      - bash scripts/run.sh stop frontend
+      - '{{.STIRLING}} stop frontend'
 
   frontend:restart:
     desc: "Restart the frontend dev server"
@@ -452,23 +455,23 @@ tasks:
   status:
     desc: "Show which dev components are running"
     cmds:
-      - bash scripts/run.sh status
+      - '{{.STIRLING}} status'
 
   stop:all:
     desc: "Stop every dev component"
     cmds:
-      - bash scripts/run.sh stop-all
+      - '{{.STIRLING}} stop'
 
   dev:strangler:
     desc: "Start the full stack: Rust (:8081) → Java (:8080) → frontend + engine"
     cmds:
       - task: rust:run
       - task: backend:run
-      - bash scripts/run.sh wait-for 300 http://localhost:8081/health || true
-      - bash scripts/run.sh wait-for 600 http://localhost:8080/api/v1/info/version || true
+      - '{{.STIRLING}} wait 300 http://localhost:8081/health || true'
+      - '{{.STIRLING}} wait 600 http://localhost:8080/api/v1/info/version || true'
       - task: engine:bg
       - task: frontend:run
-      - bash scripts/run.sh status
+      - '{{.STIRLING}} status'
 
   restart:all:
     desc: "Restart every dev component in dependency order"

@@ -80,49 +80,54 @@ impl RagCapability {
         )
     }
 
-    /// `None` once the per-run search budget is exhausted, which removes the
-    /// tool and prevents runaway search loops (Python `prepare` hook).
+    /// `None` once the per-run search budget is exhausted — the `visible`
+    /// predicate hides the tool from subsequent rounds, matching Python's
+    /// `prepare` hook.
     pub fn tool(&self) -> Option<AgentTool> {
-        if self.search_count.load(Ordering::SeqCst) >= self.max_searches {
-            return None;
-        }
         let documents = self.documents.clone();
         let principals = self.principals.clone();
         let collections = self.collections.clone();
         let top_k = self.top_k;
         let count = self.search_count.clone();
-        Some(AgentTool::new(
-            "search_knowledge",
-            "Search the knowledge base for information relevant to the query.",
-            serde_json::from_str(SEARCH_KNOWLEDGE_PARAMETERS).unwrap(),
-            move |args: Value, _ctx: &ToolContext| {
-                let documents = documents.clone();
-                let principals = principals.clone();
-                let collections = collections.clone();
-                let count = count.clone();
-                Box::pin(async move {
-                    count.fetch_add(1, Ordering::SeqCst);
-                    let query = args
-                        .get("query")
-                        .and_then(Value::as_str)
-                        .ok_or("query is required")?
-                        .to_string();
-                    let k = args
-                        .get("max_results")
-                        .and_then(Value::as_u64)
-                        .map(|v| v as usize)
-                        .unwrap_or(top_k);
-                    let results =
-                        search(&documents, &principals, collections.as_deref(), &query, k)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                    if results.is_empty() {
-                        return Ok("No relevant results found in the knowledge base.".to_string());
-                    }
-                    Ok(format_results(&results))
-                })
-            },
-        ))
+        let budget_count = self.search_count.clone();
+        let max_searches = self.max_searches;
+        Some(
+            AgentTool::new(
+                "search_knowledge",
+                "Search the knowledge base for information relevant to the query.",
+                serde_json::from_str(SEARCH_KNOWLEDGE_PARAMETERS).unwrap(),
+                move |args: Value, _ctx: &ToolContext| {
+                    let documents = documents.clone();
+                    let principals = principals.clone();
+                    let collections = collections.clone();
+                    let count = count.clone();
+                    Box::pin(async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        let query = args
+                            .get("query")
+                            .and_then(Value::as_str)
+                            .ok_or("query is required")?
+                            .to_string();
+                        let k = args
+                            .get("max_results")
+                            .and_then(Value::as_u64)
+                            .map(|v| v as usize)
+                            .unwrap_or(top_k);
+                        let results =
+                            search(&documents, &principals, collections.as_deref(), &query, k)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                        if results.is_empty() {
+                            return Ok(
+                                "No relevant results found in the knowledge base.".to_string()
+                            );
+                        }
+                        Ok(format_results(&results))
+                    })
+                },
+            )
+            .visible(move || budget_count.load(Ordering::SeqCst) < max_searches),
+        )
     }
 }
 

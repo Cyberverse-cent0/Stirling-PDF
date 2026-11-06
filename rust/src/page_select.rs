@@ -44,6 +44,24 @@ pub fn parse_page_list(selection: &str, total_pages: usize) -> Result<Vec<usize>
 /// selections and ones matching no page; numbers outside the document are
 /// fine while something else matches.
 pub fn require_valid_page_selection(selection: &str, total_pages: usize) -> Result<(), String> {
+    check_page_selection(selection, total_pages, true)
+}
+
+/// Mirrors `GeneralUtils.requireWellFormedPageSelection`: rejects malformed
+/// selections but allows ones matching no page — filters treat "nothing
+/// matched" as a filter result, not an error.
+pub fn require_well_formed_page_selection(
+    selection: &str,
+    total_pages: usize,
+) -> Result<(), String> {
+    check_page_selection(selection, total_pages, false)
+}
+
+fn check_page_selection(
+    selection: &str,
+    total_pages: usize,
+    require_match: bool,
+) -> Result<(), String> {
     if selection.trim().is_empty() {
         return Ok(());
     }
@@ -89,7 +107,7 @@ pub fn require_valid_page_selection(selection: &str, total_pages: usize) -> Resu
     } else {
         vec![selection]
     };
-    if invalid.is_empty() && !matches_a_page {
+    if require_match && invalid.is_empty() && !matches_a_page {
         invalid = if out_of_range.is_empty() {
             vec![selection]
         } else {

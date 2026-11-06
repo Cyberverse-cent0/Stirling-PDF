@@ -42,6 +42,19 @@ fn box_value(doc: &Document, page_id: ObjectId, key: &[u8]) -> Value {
         };
         if let Ok(value) = dict.get(key) {
             if let Ok((_, resolved)) = doc.dereference(value) {
+                if let Object::Array(items) = resolved {
+                    let numbers: Option<Vec<f64>> = items
+                        .iter()
+                        .map(|item| match item {
+                            Object::Integer(v) => Some(*v as f64),
+                            Object::Real(v) => Some(*v as f64),
+                            _ => None,
+                        })
+                        .collect();
+                    if let Some(numbers) = numbers {
+                        return Value::Array(numbers.into_iter().map(|v| json!(v)).collect());
+                    }
+                }
                 if !matches!(resolved, Object::Null) {
                     return scalar(doc, value);
                 }

@@ -64,6 +64,29 @@ This project uses [Task](https://taskfile.dev/) as a unified command runner for 
 
 For adding translations, see the [Translation Guide](docs/developer/HowToAddNewLanguage.md).
 
+### Rust tooling CLI (`stirling`)
+
+The `stirling` binary (`rust/cli`) is the cross-platform replacement for the
+repo's dev shell scripts. Build it with `cargo build -p stirling` (from
+`rust/`) and run `./rust/target/debug/stirling --help`.
+
+```bash
+stirling doctor            # environment + external engine check
+stirling engines list      # detect ghostscript/qpdf/tesseract/libreoffice/...
+stirling check             # fmt --check + clippy -D warnings + tests
+stirling test unit         # unit tests (also: integration, engine, fixtures, runtime)
+stirling start rust cargo run --manifest-path rust/Cargo.toml   # detached dev process
+stirling status && stirling logs rust && stirling stop rust     # .run/ pid management
+stirling health --url http://127.0.0.1:8081/health
+stirling wait 60 http://127.0.0.1:8081/health   # poll until 2xx
+stirling ports free 8080 5173                  # replaces find-free-port.sh
+stirling migration audit   # count/classify remaining shell scripts
+```
+
+All commands accept `--json`. See `migration/reports/` for the shell-script
+inventory and the elimination plan; old scripts remain in place until their
+Rust replacements are verified.
+
 ## License
 
 Stirling PDF is open-core. See [LICENSE](LICENSE) for details.
