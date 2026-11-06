@@ -3,7 +3,7 @@
 Evidence-based parity status per subsystem. Statuses:
 `MATCHED` / `PARTIAL` / `MISSING` / `DEFECT` / `VERIFIED` / `JAVA_FALLBACK`.
 Authoritative per-endpoint divergences: `rust/MIGRATION.md` +
-`migration/FINAL_COMPLETION_AUDIT.md`.
+`migration/reports/FINAL_COMPLETION_AUDIT.md`.
 
 ## PDF operation endpoints (`/api/v1/{general,analysis,misc,security,form,filter,convert,layout}`)
 
@@ -65,6 +65,6 @@ metrics, and graceful shutdown — **without JPA persistence, schedulers,
 crypto signing stack, or several convert/raster endpoints**. Remaining
 Java dependency: the opt-in proxy fallback for unmigrated routes plus
 the proprietary/SaaS surface (explicitly out of scope). See
-`migration/REMAINING_WORK.md` for the ordered punch list (P0 done;
+`migration/reports/REMAINING_WORK.md` for the ordered punch list (P0 done;
 P1 verify, P2 small endpoints, P3 convert family, P4 raster, P5 crypto,
 P6 platform).

@@ -2,8 +2,8 @@
 
 Side-by-side structural map. "Java" = Spring Boot modular monolith;
 "Rust" = axum strangler backend + in-progress Rust AI engine.
-Detail ledgers: `migration/FINAL_COMPLETION_AUDIT.md`,
-`migration/FINAL_MIGRATION_AUDIT.md`, `migration/REMAINING_WORK.md`.
+Detail ledgers: `migration/reports/FINAL_COMPLETION_AUDIT.md`,
+`migration/reports/FINAL_MIGRATION_AUDIT.md`, `migration/reports/REMAINING_WORK.md`.
 
 ## Modules
 
@@ -61,4 +61,4 @@ otherwise 404 — the proxy is opt-in, no longer default-on)
 - `rust/engine` is a *separate* crate/process, not wired into the server;
   Python `engine/` remains production.
 - Proprietary/SaaS (~74 controllers) stays Java by design — see
-  `migration/JAVA_DECOMMISSIONING_AUDIT.md` for the end-state options.
+  `migration/reports/JAVA_DECOMMISSIONING_AUDIT.md` for the end-state options.

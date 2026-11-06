@@ -24,7 +24,7 @@ unmigrated `/api/**` route.
 - Support modules: `pdfdoc.rs`, `upload.rs`, `page_select.rs`, `text.rs`,
   `fontmetrics.rs`, `convert.rs`, `attachments.rs`, `imgextract.rs`,
   `imgcomp.rs`, `forms.rs`, `guard.rs`, `config.rs`, `error.rs`, `testkit.rs`
-- `rust/MIGRATION.md`, `migration/FINAL_MIGRATION_AUDIT.md`, all reports in
+- `rust/MIGRATION.md`, `migration/reports/FINAL_MIGRATION_AUDIT.md`, all reports in
   `migration/reports/`
 - Git working tree: 272 changed paths (48 modified, 43 untracked, 181 deleted
   — mostly Java controllers superseded by Rust). Concurrent-agent work was

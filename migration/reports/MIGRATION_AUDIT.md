@@ -39,7 +39,7 @@ Route families now registered in Rust (from `handlers/mod.rs`, ~112 paths):
 
 | Area | Status | Notes |
 |---|---|---|
-| AuthN/Z (sessions, API keys, license) | PARTIAL | `auth.rs` + `guard.rs` middleware ported; proprietary auth/licensing stack stays Java — see `migration/JAVA_DECOMMISSIONING_AUDIT.md` |
+| AuthN/Z (sessions, API keys, license) | PARTIAL | `auth.rs` + `guard.rs` middleware ported; proprietary auth/licensing stack stays Java — see `migration/reports/JAVA_DECOMMISSIONING_AUDIT.md` |
 | Jobs (`?async=true`) | PARTIAL | In-memory job table + files endpoints; no DB persistence (P6 decision pending) |
 | Pipeline/workflow, folders | JAVA_FALLBACK | JPA-backed; `handleData` port is P2-last |
 | Admin/audit/billing/teams/account-link/MCP/policy/SaaS | JAVA_FALLBACK | ~74 proprietary/SaaS controllers explicitly out of scope |

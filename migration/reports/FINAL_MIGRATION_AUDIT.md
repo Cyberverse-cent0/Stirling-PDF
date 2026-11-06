@@ -167,7 +167,7 @@ Post-agent reconciliation pass (this update):
   `POST /api/v1/convert/pdf/cbz`.
 - `rust/src/handlers/mod.rs` — registered `/api/v1/convert/cbz/pdf` and
   `/api/v1/convert/pdf/cbz`.
-- `migration/FINAL_MIGRATION_AUDIT.md` — this document.
+- `migration/reports/FINAL_MIGRATION_AUDIT.md` — this document.
 
 Earlier pass: no Rust or Java source modified — reconciliation found no
 defects requiring fixes.

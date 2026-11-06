@@ -18,10 +18,10 @@ are from static inspection.
   `routes/mod.rs`, per-directory `mod.rs`/`*.rs` pairs.
 - `rust/Cargo.toml`, `rust/engine/Cargo.toml`, `rust/.cargo/config.toml`.
 - `rust/tests/` (fixtures, scripts, README).
-- Migration reports: `migration/FINAL_MIGRATION_AUDIT.md`,
-  `migration/INTEGRATION_REPORT.md`, `migration/reports/agent-01..12.md`,
+- Migration reports: `migration/reports/FINAL_MIGRATION_AUDIT.md`,
+  `migration/reports/INTEGRATION_REPORT.md`, `migration/reports/agent-01..12.md`,
   `PHASE-01/02/03/04/05/06/08-*.md`, `misc-remainder.md`,
-  `platform-hardening.md`, `migration/RUST_MIGRATION.md`, `rust/MIGRATION.md`.
+  `platform-hardening.md`, `migration/reports/RUST_MIGRATION.md`, `rust/MIGRATION.md`.
 - `git status` / `git log` — the whole migration is **uncommitted** on
   `feature/rust-rewite`; last commits are the Rust backend skeleton and
   `pdf-to-single-page`.

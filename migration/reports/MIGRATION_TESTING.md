@@ -54,7 +54,7 @@ Python outputs, document store tests). Python-side pytest suite
   fingerprint script (which covers PDFs); error-shape comparison is manual.
 - Live parity sweep (`testing/parity.sh`, `rust_pdf_parity.py`) has not
   been re-run since the route set grew to ~112 — P1 in
-  `migration/REMAINING_WORK.md`.
+  `migration/reports/REMAINING_WORK.md`.
 - Async-job parity (status JSON fields, ISO vs epoch timestamps) not under
   automated diff.
 - Auth/settings-gated behavior: Rust now has `auth.rs`/`guard.rs` +

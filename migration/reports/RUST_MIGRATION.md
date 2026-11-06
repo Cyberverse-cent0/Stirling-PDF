@@ -28,7 +28,7 @@ on :8080 as usual — run both to test the strangler topology.
 ## Migrated endpoints (served by Rust)
 
 Snapshot 2026-11-06; the authoritative per-endpoint list is the route
-table in `rust/src/handlers/mod.rs`. See `migration/FINAL_MIGRATION_AUDIT.md`
+table in `rust/src/handlers/mod.rs`. See `migration/reports/FINAL_MIGRATION_AUDIT.md`
 for the full Java↔Rust reconciliation.
 
 | Area | Endpoints |

@@ -2,7 +2,7 @@
 
 Everything the Rust backend cannot yet do alone, and what must be replaced
 or explicitly retired before Java can be removed. Ordered punch list:
-`migration/REMAINING_WORK.md` (P0 compile — done; P1–P6 open).
+`migration/reports/REMAINING_WORK.md` (P0 compile — done; P1–P6 open).
 
 ## Hard blockers (functional)
 
@@ -64,7 +64,7 @@ or explicitly retired before Java can be removed. Ordered punch list:
 
 ## Explicit non-goals / stay-Java candidates
 
-Per `migration/JAVA_DECOMMISSIONING_AUDIT.md`: proprietary/SaaS modules
+Per `migration/reports/JAVA_DECOMMISSIONING_AUDIT.md`: proprietary/SaaS modules
 (billing, storage, MCP, policy, account-link, ~74 controllers) may remain
 Java longest — or move to a slim control plane. This is an **open
 architectural decision**, documented but not yet resolved.

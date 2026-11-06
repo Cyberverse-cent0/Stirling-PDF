@@ -338,14 +338,18 @@ compileTestJava` on all modules after each pass.
   `PasswordController::restore-pdf-protection`) and all of
   proprietary/saas. `RedactController::auto-redact`/`redact-execute`
   are routed natively (`pdftext::redact` + overlay cover, matching
-  Java's PDFBox fallback; `convertToImage`/rasterizing plans still
-  need a renderer). The jpdfium markdown pipeline is fully ported in
+  Java's PDFBox fallback; `convertPDFToImage` rasterises through
+  Ghostscript at 300 DPI like `PdfUtils.convertPdfToPdfImage`). The jpdfium markdown pipeline is fully ported in
   `rust/src/pdftext/` and serves `/convert/pdf/markdown`.
 - [ ] Phase G build cleanup (only after F): `settings.gradle`,
   `app/*/build.gradle`, `buildSrc/`, `.taskfiles/backend.yml`,
   `runtime/docker/**`, Java jobs in `.github/workflows/*`.
-- [ ] Phase H verification: boot Rust with no JDK/`JAVA_HOME` and no
-  `JAVA_BACKEND_URL`; full API smoke; `testing/parity.sh` stays
+- [x] Phase H verification (2026-11-06): `stirling-server` boots and
+  serves with `JAVA_HOME`/`JAVA_BACKEND_URL` unset and no JVM linkage
+  (`ldd` clean); `info/version` reports `runtime: rust`, and live
+  requests verified — `merge-pdfs`, `convert/pdf/pdfa` (PDF/A-2b),
+  `form/fields`, `security/sanitize-pdf` all 200 with valid PDFs.
+  `stirling test runtime` smoke: 12/12 PASS. `testing/parity.sh` stays
   obsolete (Java controllers for migrated endpoints are deleted).
 
 ## P8 — Engine cutover and tooling
@@ -360,12 +364,43 @@ compileTestJava` on all modules after each pass.
   scripts (`test-general.sh`, `test-security.sh`, `smoke.sh`) to Rust
   integration tests or `stirling test runtime`, then delete the `.sh`;
   `backend:run/stop` stays on `scripts/run.sh` until Java retires.
-- [ ] Frontend backend target: `frontend/vite.config.ts` defaults
-  `BACKEND_URL` to `http://localhost:8080` (Java). Align with the Rust
-  server (`:8081`) or a single-port deployment; check `.env*` files,
-  desktop/saas modes, and nginx/embedded serving in `web.rs`.
+- [x] Frontend backend target: `frontend/vite.config.ts` defaults
+  `BACKEND_URL` to `http://localhost:8081` (Rust standalone); `:8080`
+  remains an override for a Java sidecar. `VITE_DESKTOP_BACKEND_URL`
+  stays empty so desktop uses the bundled backend.
 - [ ] CI: Java build/test/package jobs in `.github/workflows/` still
   run on every PR — gate or remove as decommission phases land.
+
+## P9 — Desktop (Tauri) Rust-backend migration
+
+Audit: `migration/reports/desktop-phase-b-endpoint-audit.md`.
+
+- [x] Phase A — sidecar wiring: `select_backend()` prefers
+  `stirling-server[-<triple>]`, `STIRLING_DESKTOP_BACKEND` override,
+  `run_stirling_server()` env contract verified live (port banner,
+  `/health`, sentinel shutdown). `find_rust_server` probes packaged
+  resources, `src-tauri/binaries/` (dev), and `STIRLING_SERVER_PATH`;
+  `task desktop:rust-server` stages the binary and is wired into
+  `prepare`. Tauri crate: check/clippy/test/fmt clean (90 tests).
+- [x] Phase B — endpoint surface: `endpointconfig::UNSUPPORTED_ENDPOINTS`
+  marks the no-route keys (`cert-sign`, `timestamp-pdf`,
+  `validate-signature`, `verify-pdf`, `validate-compliance`, `ingest`,
+  `restore-pdf-protection`, `orchestrate`, `tools`, `external-api-call`,
+  `purview-*`) disabled with `DisableReason::NotSupported` →
+  `NOT_SUPPORTED_LOCALLY`; path spellings translate to keys. Engine-gated
+  endpoints degrade via `ENGINE_PROBES` group probes. Dead registry keys
+  and frontend-composed tools deliberately left enabled (parity + they
+  work through routed calls).
+- [ ] Phase C — engine bundling: decide per-platform which of
+  `gs`/`qpdf`/`pdftohtml`/`rsvg-convert`/`inkscape`/unrar-family/
+  `tesseract`+`ocrmypdf` ship in the installer; `weasyprint`/`soffice`/
+  `ebook-convert` likely stay off (group probes already degrade).
+- [ ] Phase D — installer slimming: drop `libs/*.jar` +
+  `runtime/jre/**` from `tauri.conf.json` resources and the
+  `BackendKind::Java` fallback once the Rust path is proven on all
+  desktop OSes (~100 MB+ per installer). Requires a real
+  `tauri build` smoke test first — `cargo check` does not cover
+  `externalBin` resource resolution.
 
 ## Explicitly out of scope (do not touch)
 

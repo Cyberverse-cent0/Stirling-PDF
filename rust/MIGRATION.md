@@ -44,13 +44,13 @@ rest. The frontend keeps calling `/api/*`; routing decides who answers.
   Engine presence is probed at startup (`endpointconfig::probe_engines`,
   mirroring Java's `ExternalAppDepConfig`) — a missing sidecar disables
   its tool group and the guard returns 403. Verified status and the
-  remaining-work list live in `migration/FINAL_COMPLETION_AUDIT.md`,
-  `migration/REMAINING_WORK.md`, and the per-endpoint engine/param
+  remaining-work list live in `migration/reports/FINAL_COMPLETION_AUDIT.md`,
+  `migration/reports/REMAINING_WORK.md`, and the per-endpoint engine/param
   audit in `migration/reports/P3-CONVERSION-READINESS.md`.
   **As of 2026-11-06 the crate compiles clean** — `cargo check`,
   `cargo clippy --all-targets --all-features -- -D warnings`,
   `cargo fmt --check`, and 305 `cargo test` cases all pass. The
-  earlier 23-error state is resolved; see `migration/REMAINING_WORK.md`.
+  earlier 23-error state is resolved; see `migration/reports/REMAINING_WORK.md`.
   **Parity caveat:** the Java controllers for migrated endpoints are
   deleted in the working tree, so `testing/parity.sh` can no longer
   diff them (Java 404s). Migrated endpoints now rely on Rust unit
@@ -162,8 +162,9 @@ Known divergences so far:
   `ScalePagesController.ownSize`. `crop` is clip-only (`autoCrop`
   rejected, `removeDataOutsideCrop` does not shell to Ghostscript, so
   out-of-crop data remains in the stream).
-- `misc/flatten` handles only `flattenOnlyForms=true` natively; every other
-  flatten request is forwarded to Java. `misc/compress-pdf` uses
+- `misc/flatten` handles only `flattenOnlyForms=true` natively; other
+  flatten modes rasterise every page and are rejected. `misc/compress-pdf`
+  uses
   Ghostscript/qpdf sidecars when present plus the lopdf image pass, so bytes
   will differ from Java even when size targets match.
 - `general/pdf-to-single-page` — done on lopdf via `pdfdoc::to_single_page`:
@@ -365,8 +366,9 @@ SQLite/SQLx.
 
 ### Phase 4 — Cutover and cleanup
 
-- Frontend points at Rust only; remove proxy fallback.
-- Delete `app/` Gradle modules, `build.gradle`, `gradlew`, `.taskfiles/backend.yml`.
+- [x] Frontend points at Rust only; proxy fallback removed (`handlers/proxy.rs`
+      deleted, unmigrated `/api/**` → 404).
+- [ ] Delete `app/` Gradle modules, `build.gradle`, `gradlew`, `.taskfiles/backend.yml`.
 - Keep `engine/` (Python) — it proxies through whichever backend serves
   `/api/v1/ai-engine/*`.
 
