@@ -236,6 +236,100 @@ impl AppSettings {
             )?,
         })
     }
+
+    /// Test fixture mirroring `build_app_settings()` in the Python conftest:
+    /// env-free settings with inert providers so `AppState::new` works offline.
+    #[doc(hidden)]
+    pub fn for_test() -> Self {
+        Self {
+            smart_model_name: "test".to_string(),
+            fast_model_name: "test".to_string(),
+            chat_provider: String::new(),
+            smart_model_max_tokens: Some(8192),
+            fast_model_max_tokens: Some(2048),
+            model_max_concurrency: 32,
+            documents_backend: DocumentsBackend::Sqlite,
+            documents_sqlite_path: std::path::PathBuf::from(":memory:"),
+            documents_pgvector_dsn: String::new(),
+            documents_pgvector_pool_min_size: 1,
+            documents_pgvector_pool_max_size: 10,
+            rag_embedding_model: "voyageai:voyage-4".to_string(),
+            rag_chunk_size: 512,
+            rag_chunk_overlap: 64,
+            rag_default_top_k: 5,
+            rag_max_searches: 5,
+            planner_shortlist_size: 8,
+            documents_reaper_interval_seconds: 60,
+            chunked_reasoner_chars_per_slice: 16_000,
+            chunked_reasoner_concurrency: 10,
+            chunked_reasoner_worker_timeout_seconds: 60.0,
+            chunked_reasoner_notes_char_budget: 250_000,
+            contradiction_detect_concurrency: 5,
+            contradiction_bucket_chunk_size: 12,
+            contradiction_bucket_chunk_overlap: 2,
+            contradiction_canonicaliser_batch_size: 500,
+            max_pages: 200,
+            max_characters: 200_000,
+            require_user_id: false,
+            log_level: "info".to_string(),
+            log_file: String::new(),
+            http_debug: false,
+            posthog_enabled: false,
+            posthog_api_key: String::new(),
+            posthog_host: "https://eu.i.posthog.com".to_string(),
+            engine_shared_secret: String::new(),
+            engine_require_auth: false,
+            allow_config_push: true,
+            config_cache_poll_interval_seconds: 15,
+        }
+    }
+}
+
+/// Test fixture mirroring `build_app_settings()` in the Python conftest:
+/// env-free settings with inert providers so `AppState::new` works offline.
+#[doc(hidden)]
+pub fn for_test() -> AppSettings {
+    AppSettings {
+        smart_model_name: "test".to_string(),
+        fast_model_name: "test".to_string(),
+        chat_provider: String::new(),
+        smart_model_max_tokens: Some(8192),
+        fast_model_max_tokens: Some(2048),
+        model_max_concurrency: 32,
+        documents_backend: DocumentsBackend::Sqlite,
+        documents_sqlite_path: std::path::PathBuf::from(":memory:"),
+        documents_pgvector_dsn: String::new(),
+        documents_pgvector_pool_min_size: 1,
+        documents_pgvector_pool_max_size: 10,
+        rag_embedding_model: "voyageai:voyage-4".to_string(),
+        rag_chunk_size: 512,
+        rag_chunk_overlap: 64,
+        rag_default_top_k: 5,
+        rag_max_searches: 5,
+        planner_shortlist_size: 8,
+        documents_reaper_interval_seconds: 60,
+        chunked_reasoner_chars_per_slice: 16_000,
+        chunked_reasoner_concurrency: 10,
+        chunked_reasoner_worker_timeout_seconds: 60.0,
+        chunked_reasoner_notes_char_budget: 250_000,
+        contradiction_detect_concurrency: 5,
+        contradiction_bucket_chunk_size: 12,
+        contradiction_bucket_chunk_overlap: 2,
+        contradiction_canonicaliser_batch_size: 500,
+        max_pages: 200,
+        max_characters: 200_000,
+        require_user_id: false,
+        log_level: "info".to_string(),
+        log_file: String::new(),
+        http_debug: false,
+        posthog_enabled: false,
+        posthog_api_key: String::new(),
+        posthog_host: "https://eu.i.posthog.com".to_string(),
+        engine_shared_secret: String::new(),
+        engine_require_auth: false,
+        allow_config_push: true,
+        config_cache_poll_interval_seconds: 15,
+    }
 }
 
 pub type SharedSettings = Arc<AppSettings>;

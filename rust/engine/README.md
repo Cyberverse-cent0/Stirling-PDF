@@ -2,8 +2,9 @@
 
 Rust replacement for the Python AI engine in `engine/` (FastAPI + pydantic-ai).
 Same HTTP contract, same `STIRLING_*` env vars, same port (default `5001`).
-The Python engine remains the parity oracle until cutover; see
-`../../rust/MIGRATION.md` and the migration plan for phase tracking.
+**Cut over**: `task dev:all`, `task dev:strangler`, and `task engine:bg` all
+run this binary; the Python engine remains under `task engine:*` as the
+parity oracle until it is retired.
 
 ## Status
 
@@ -75,25 +76,30 @@ The Python engine remains the parity oracle until cutover; see
 - **JSON Schema derives** — all `src/contracts/*` types and
   `models/tool_models.rs` enums derive `schemars::JsonSchema` (the
   `chrono` feature is enabled for `DateTime<FixedOffset>` fields).
+- **Full agent surface** — orchestrator (NDJSON streaming + heartbeats),
+  pdf-edit, pdf-questions, pdf-create, pdf-review, agent drafts/revise,
+  execution planning, math-auditor ledger (examine/deliberate),
+  contradiction detection, chunked reasoner/mapper, whole-doc reader,
+  user-spec extraction (`src/agents/`).
+- **Config push + encrypted cache** — `src/config_push.rs` +
+  `src/config_cache.rs`: Fernet-compatible encryption (verified against
+  Python-produced tokens), HKDF key derivation, atomic 0600 writes,
+  mtime-poll adoption across workers.
+- **Wire parity** — every contract field accepts both the camelCase alias
+  and the snake_case field name (pydantic `validate_by_name` +
+  `validate_by_alias`); `expires_at` accepts pydantic's wider ISO-8601
+  range; request models enforce the pydantic `Field(ge/min_length/max)`
+  constraints as 422s; malformed JSON bodies reject as 422
+  `{"detail": ...}` via `src/extract.rs`.
 
 ### Planned (not yet ported)
 
-- Agent runtime gaps: streaming responses, `NativeOutput`/`ToolOutput`
-  distinction (loop always uses the tool mechanism — fine for every
-  supported provider), multi-turn chat-history messages (callers currently
-  flatten history into the prompt, matching most Python agents),
-  `MockModel` test double, tool `prepare` hooks beyond search budget.
-- Remaining agents (orchestrator + NDJSON streaming, pdf-edit/questions/
-  review/create, drafts, execution, ledger, contradiction, whole-doc
-  reader, chunked reasoner, math auditor, user-spec).
-- Remaining routers: orchestrator (NDJSON streaming + heartbeats),
-  pdf-edit, pdf-questions, agent-drafts, execution planning,
-  math-auditor (ledger), config (push + encrypted cache).
-- Config cache (Fernet-compatible encryption, HKDF key derivation, atomic
-  0600 writes, mtime polling) and the documents reaper background task.
-- Minimal PostHog capture; OpenTelemetry beyond request tracing.
-- Python test-suite port (~47 pytest files) and the Java↔Rust parity
-  harness.
+- Agent runtime gaps: `MockModel` test double for scripted agent tests;
+  remaining Python pytest files (agent/route-level behaviour suites
+  under `engine/tests/agents`, `tests/contradiction`, `tests/docparse`,
+  `tests/ledger`, `tests/pdf_comment`).
+- OpenTelemetry beyond request tracing.
+- Python engine retirement once test parity is deemed sufficient.
 
 ## Vector store (SqliteVecStore)
 
@@ -223,12 +229,13 @@ Taskfile: `task rust:engine:check` runs fmt + clippy + tests for this crate.
 
 ## Known divergences from Python
 
-- Pydantic `Field(ge=…, min_length=…)` wire validation is not yet enforced
-  on request bodies (typed shapes only); agent-side schema validation
-  covers LLM outputs. Track before cutover.
-- Request bodies accept camelCase (the Java wire format); Python also
-  accepts snake_case aliases — not replicated.
-- `expires_at` uses RFC 3339 (`DateTime<FixedOffset>`); pydantic accepts
-  a wider ISO range.
+- Agent *output* schema constraints (contradiction, ledger, pdf-comments
+  response models) are validated agent-side, not at the serde layer —
+  matching Python's split between wire validation and
+  `NativeOutput`/`ToolOutput` schema enforcement.
+- Naive `expires_at` values (no offset) are interpreted as UTC; pydantic
+  keeps them naive and lets the store compare them.
+- 422 bodies carry a single `detail` string rather than pydantic's
+  per-field error list — Java only surfaces the status + detail upstream.
 - Voyage `input_type` is sent as a top-level JSON field (same effective
   wire shape as pydantic-ai's `extra_body` merge).

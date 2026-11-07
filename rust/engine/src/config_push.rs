@@ -204,7 +204,11 @@ mod tests {
         }
     }
 
-    fn push(models: serde_json::Value, rag: serde_json::Value, limits: serde_json::Value) -> ConfigPushRequest {
+    fn push(
+        models: serde_json::Value,
+        rag: serde_json::Value,
+        limits: serde_json::Value,
+    ) -> ConfigPushRequest {
         serde_json::from_value(serde_json::json!({
             "models": models, "rag": rag, "limits": limits
         }))
@@ -302,7 +306,10 @@ mod tests {
             serde_json::json!({}),
         );
         let resolved = resolve_and_apply(&current, &req).unwrap();
-        assert_eq!(resolved.settings.rag_embedding_model, "ollama:nomic-embed-text");
+        assert_eq!(
+            resolved.settings.rag_embedding_model,
+            "ollama:nomic-embed-text"
+        );
         assert_eq!(resolved.settings.rag_default_top_k, 9);
         assert_eq!(resolved.notes.len(), 1);
         assert!(resolved.notes[0].contains("re-index"));

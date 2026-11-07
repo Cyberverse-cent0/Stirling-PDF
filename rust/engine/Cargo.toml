@@ -59,5 +59,6 @@ prettyplease = "0.2"
 syn = { version = "2", features = ["full", "parsing"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 schemars = { version = "0.8", features = ["chrono"] }
+tower = { version = "0.5", features = ["util"] }
 
 [workspace]

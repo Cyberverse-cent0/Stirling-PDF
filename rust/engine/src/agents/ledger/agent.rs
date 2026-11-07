@@ -37,6 +37,7 @@ use crate::llm::client::LlmClient;
 const LLM_CONCURRENCY: usize = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtractedFigure {
     /// Normalised name, e.g. 'Total Revenue', 'VAT'.
     pub label: String,
@@ -47,12 +48,14 @@ pub struct ExtractedFigure {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FigureExtractionResult {
     #[serde(default)]
     pub figures: Vec<ExtractedFigure>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FormulaCheck {
     /// Human-readable, e.g. 'Line Total = Qty × Unit Price'.
     pub description: String,
@@ -72,12 +75,14 @@ pub struct FormulaCheck {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TableFormulas {
     #[serde(default)]
     pub formulas: Vec<FormulaCheck>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StatementCheck {
     /// The exact text of the claim.
     pub claim: String,
@@ -100,6 +105,7 @@ pub struct StatementCheck {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StatementsResult {
     #[serde(default)]
     pub statements: Vec<StatementCheck>,

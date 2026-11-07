@@ -5,13 +5,14 @@ use std::collections::HashMap;
 
 use axum::extract::State;
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Router;
 
 use crate::contracts::docparse::{DocparseCapabilities, IngestRequest, IngestResponse};
 use crate::contracts::documents::PageText;
 use crate::docparse::chunking::{pack_blocks, page_texts};
 use crate::documents::service::{CONTENT_TYPE_METADATA_KEY, DOCPARSE_CHUNK_CONTENT_TYPE};
 use crate::error::{ApiError, ApiResult};
+use crate::extract::Json;
 use crate::middleware::RequiredUserId;
 use crate::state::AppState;
 
@@ -53,6 +54,7 @@ async fn ingest(
     RequiredUserId(user_id): RequiredUserId,
     Json(request): Json<IngestRequest>,
 ) -> ApiResult<Json<IngestResponse>> {
+    request.validate().map_err(ApiError::unprocessable)?;
     let settings = state.runtime.load().settings.clone();
     let chunk_size = request.chunk_size.unwrap_or(settings.rag_chunk_size);
     let overlap = request.overlap.unwrap_or(settings.rag_chunk_overlap);

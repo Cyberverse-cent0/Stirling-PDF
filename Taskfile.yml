@@ -227,7 +227,7 @@ tasks:
       FRONTEND_PORT: '{{index (splitList "\n" .PORTS) 1}}'
       ENGINE_PORT: '{{index (splitList "\n" .PORTS) 2}}'
     deps:
-      - task: engine:dev
+      - task: rust:engine:dev
         vars:
           PORT: '{{.ENGINE_PORT}}'
       - task: '{{.BACKEND_TASK}}'
@@ -421,9 +421,9 @@ tasks:
       - task: backend:run
 
   engine:bg:
-    desc: "Start the Python engine in the background (:5001)"
+    desc: "Start the Rust AI engine in the background (:5001); the Python engine stays available via task engine:dev"
     cmds:
-      - '{{.STIRLING}} start engine --cwd engine -- uv run --locked --group engine --group engine-dev uvicorn stirling.api.app:app --host 0.0.0.0 --port {{.PORT | default "5001"}} --reload'
+      - '{{.STIRLING}} start engine --cwd rust/engine -- env PORT={{.PORT | default "5001"}} cargo run'
 
   engine:bg:stop:
     desc: "Stop the Python engine"

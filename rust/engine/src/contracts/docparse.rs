@@ -7,12 +7,14 @@ use serde::{Deserialize, Serialize};
 use crate::models::{FileId, OwnerId, PrincipalId};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DocparseCapabilities {
     #[serde(alias = "indexing_configured")]
     pub indexing_configured: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MarkdownBlock {
     pub markdown: String,
     #[serde(alias = "page_start")]
@@ -25,6 +27,7 @@ pub struct MarkdownBlock {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DocChunk {
     pub index: i64,
     pub text: String,
@@ -40,6 +43,7 @@ pub struct DocChunk {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IngestRequest {
     #[serde(alias = "document_id")]
     pub document_id: FileId,
@@ -71,6 +75,37 @@ pub struct IngestRequest {
     pub include_chunks: bool,
 }
 
+impl IngestRequest {
+    /// `Field(ge=...)`/`min_length` checks from the pydantic contract.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.document_id.is_empty() {
+            return Err("documentId must not be empty".to_string());
+        }
+        if self.source.is_empty() {
+            return Err("source must not be empty".to_string());
+        }
+        if self.read_principals.as_ref().is_some_and(Vec::is_empty) {
+            return Err("readPrincipals must not be empty when provided".to_string());
+        }
+        for block in &self.blocks {
+            if block.page_start < 1 || block.page_end < 1 {
+                return Err("block pageStart/pageEnd must be >= 1".to_string());
+            }
+        }
+        if let Some(size) = self.chunk_size {
+            if !(64..=32_768).contains(&size) {
+                return Err("chunkSize must be between 64 and 32768".to_string());
+            }
+        }
+        if let Some(overlap) = self.overlap {
+            if overlap > 4_096 {
+                return Err("overlap must be at most 4096".to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
 fn default_source() -> String {
     "docparse".to_string()
 }
@@ -80,6 +115,7 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IngestResponse {
     #[serde(alias = "document_id")]
     pub document_id: FileId,

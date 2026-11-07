@@ -22,8 +22,8 @@ services (~74 controllers) stay out of scope.
 
 | # | Feature | Blocker / notes |
 |---|---------|-----------------|
-| 1 | `POST /security/validate-compliance` | veraPDF CLI — **in progress** (this branch) |
-| 2 | `POST /security/verify-pdf` | veraPDF CLI auto-detect — **in progress** |
+| 1 | ~~`POST /security/validate-compliance`~~ | **done** — veraPDF CLI; 422 `/errors/compliance-not-met` on failure, Java detail format |
+| 2 | ~~`POST /security/verify-pdf`~~ | **done** — XMP flavour detect + per-flavour `PDFVerificationResult` JSON |
 | 3 | `POST /security/validate-signature` | needs CMS/PKCS7 verify (`cms`+`x509-cert` crates); fixtures exist (`test_globalsign.pdf`, `test_irs_signed.pdf`) |
 | 4 | `POST /security/timestamp-pdf` | RFC 3161 TSA client + CMS timestamp embed — largest crypto piece |
 | 5 | `POST /security/cert-sign`, `/security/sign`, `hardware-signing`, `restore-pdf-protection` | PKCS#12 + CMS signing / PIV — needs `cryptoki` or software-PKCS11; dedicated crypto project |

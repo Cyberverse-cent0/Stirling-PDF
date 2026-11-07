@@ -6,6 +6,7 @@ pub mod contracts;
 pub mod docparse;
 pub mod documents;
 pub mod error;
+pub mod extract;
 pub mod llm;
 pub mod middleware;
 pub mod models;

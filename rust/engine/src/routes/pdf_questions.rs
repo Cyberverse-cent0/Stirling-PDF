@@ -2,11 +2,12 @@
 
 use axum::extract::State;
 use axum::routing::post;
-use axum::{Json, Router};
+use axum::Router;
 
 use crate::agents::pdf_questions::{PdfQuestionAgent, QuestionError};
 use crate::contracts::pdf_questions::{PdfQuestionRequest, PdfQuestionResponse};
 use crate::error::{ApiError, ApiResult};
+use crate::extract::Json;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -17,6 +18,7 @@ async fn questions(
     State(state): State<AppState>,
     Json(request): Json<PdfQuestionRequest>,
 ) -> ApiResult<Json<PdfQuestionResponse>> {
+    request.validate().map_err(ApiError::unprocessable)?;
     let agent = PdfQuestionAgent::new(
         state.runtime.load().settings.clone(),
         state.runtime.load().smart_model.clone(),

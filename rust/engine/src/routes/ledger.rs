@@ -6,7 +6,7 @@ use std::str::FromStr;
 
 use axum::extract::{Query, State};
 use axum::routing::post;
-use axum::{Json, Router};
+use axum::Router;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
@@ -14,6 +14,7 @@ use crate::agents::ledger::MathAuditorAgent;
 use crate::agents::runtime::AgentError;
 use crate::contracts::ledger::{Evidence, FolioManifest, Requisition, Verdict};
 use crate::error::{ApiError, ApiResult};
+use crate::extract::Json;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -37,6 +38,7 @@ async fn examine(
     State(state): State<AppState>,
     Json(manifest): Json<FolioManifest>,
 ) -> ApiResult<Json<Requisition>> {
+    manifest.validate().map_err(ApiError::unprocessable)?;
     let req = agent(&state)
         .examine(&manifest)
         .await

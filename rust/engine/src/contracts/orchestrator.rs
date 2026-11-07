@@ -32,6 +32,7 @@ pub enum MathAuditorSourceTag {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OrchestratorRequest {
     #[serde(alias = "user_message")]
     pub user_message: String,
@@ -52,6 +53,13 @@ pub struct OrchestratorRequest {
     #[serde(default, deserialize_with = "deserialize_endpoints")]
     #[serde(alias = "enabled_endpoints")]
     pub enabled_endpoints: Vec<ToolEndpoint>,
+}
+
+impl OrchestratorRequest {
+    /// Nested `AiFile` entries carry `min_length=1` fields.
+    pub fn validate(&self) -> Result<(), String> {
+        crate::contracts::common::validate_ai_files(&self.files)
+    }
 }
 
 pub type OrchestratorResponseUnion = OrchestratorResponse;

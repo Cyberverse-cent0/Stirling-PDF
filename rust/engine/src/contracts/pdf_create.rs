@@ -68,6 +68,7 @@ where
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DocumentStyle {
     #[serde(default, deserialize_with = "safe_color")]
     #[serde(alias = "primary_color")]
@@ -81,6 +82,7 @@ pub struct DocumentStyle {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GeneratedDocument {
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -102,6 +104,7 @@ pub enum SectionDepth {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlannedSection {
     pub heading: String,
     #[serde(rename = "type")]
@@ -113,6 +116,7 @@ pub struct PlannedSection {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DocumentMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(alias = "cannot_do_reason")]
@@ -145,12 +149,14 @@ pub struct DocumentMeta {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DocumentSections {
     #[serde(default)]
     pub sections: Vec<PlannedSection>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DocumentPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(alias = "cannot_do_reason")]
@@ -215,11 +221,13 @@ fn safe_hex(v: &str) -> Option<String> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WrittenSections {
     pub sections: Vec<DocumentSection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfCreateRequest {
     #[serde(alias = "user_message")]
     pub user_message: String,
@@ -229,6 +237,7 @@ pub struct PdfCreateRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfCreateSuccessPayload {
     pub document: GeneratedDocument,
 }

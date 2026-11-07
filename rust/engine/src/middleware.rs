@@ -81,11 +81,8 @@ pub async fn user_id(req: Request, next: Next) -> Response {
         req.extensions_mut().insert(RequestUserId(id));
     }
     crate::services::tracking::scoped(user_id, async move {
-        crate::services::tracking::scoped_trace(
-            uuid::Uuid::new_v4().to_string(),
-            next.run(req),
-        )
-        .await
+        crate::services::tracking::scoped_trace(uuid::Uuid::new_v4().to_string(), next.run(req))
+            .await
     })
     .await
 }

@@ -275,7 +275,6 @@ mod tests {
 #[cfg(test)]
 mod cache_tests {
     use super::*;
-    use crate::contracts::config::{ConfigLimitsSection, ConfigModelsSection, ConfigRagSection};
 
     fn sample() -> ConfigPushRequest {
         serde_json::from_value(serde_json::json!({
@@ -320,10 +319,15 @@ mod cache_tests {
         // HKDF-from-secret path: no keyfile is written.
         assert!(!dir.join(KEY_FILENAME).exists());
         let loaded = load_config_in(&dir, "the-shared-secret").unwrap();
-        assert_eq!(serde_json::to_value(&loaded).unwrap(), serde_json::to_value(&req).unwrap());
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap(),
+            serde_json::to_value(&req).unwrap()
+        );
         // Secrets are encrypted at rest.
         let raw = fs::read(dir.join(CACHE_FILENAME)).unwrap();
-        assert!(!raw.windows(b"secret-key-value".len()).any(|w| w == b"secret-key-value"));
+        assert!(!raw
+            .windows(b"secret-key-value".len())
+            .any(|w| w == b"secret-key-value"));
     }
 
     #[test]

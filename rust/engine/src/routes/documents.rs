@@ -3,12 +3,13 @@
 
 use axum::extract::{Path, State};
 use axum::routing::{delete, post};
-use axum::{Json, Router};
+use axum::Router;
 
 use crate::contracts::documents::{
     DeleteDocumentResponse, IngestDocumentRequest, IngestDocumentResponse, PurgeOwnerResponse,
 };
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
+use crate::extract::Json;
 use crate::middleware::RequiredUserId;
 use crate::state::AppState;
 
@@ -26,6 +27,7 @@ async fn ingest_document(
     RequiredUserId(_user_id): RequiredUserId,
     Json(request): Json<IngestDocumentRequest>,
 ) -> ApiResult<Json<IngestDocumentResponse>> {
+    request.validate().map_err(ApiError::unprocessable)?;
     let documents = state.runtime.load().documents.clone();
     let chunks_indexed = documents
         .ingest(

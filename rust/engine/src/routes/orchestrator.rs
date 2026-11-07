@@ -14,9 +14,9 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::header;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use axum::{Json, Router};
+use axum::Router;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -26,6 +26,7 @@ use crate::agents::orchestrator::OrchestratorAgent;
 use crate::contracts::orchestrator::OrchestratorRequest;
 use crate::contracts::OrchestratorResponse;
 use crate::contracts::ProgressEvent;
+use crate::extract::Json;
 use crate::services::progress;
 use crate::state::AppState;
 
@@ -72,6 +73,9 @@ async fn orchestrate(
     State(state): State<AppState>,
     Json(request): Json<OrchestratorRequest>,
 ) -> Response {
+    if let Err(e) = request.validate() {
+        return crate::error::ApiError::unprocessable(e).into_response();
+    }
     let (tx, rx) = mpsc::unbounded_channel::<Frame>();
 
     // Progress events flow through a task-local channel into the same queue.

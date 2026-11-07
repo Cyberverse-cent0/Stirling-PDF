@@ -119,7 +119,10 @@ type RestoreOutcome = (
     Vec<String>,
 );
 
-fn restore_cached(current: &AppSettings, cached: ConfigPushRequest) -> anyhow::Result<RestoreOutcome> {
+fn restore_cached(
+    current: &AppSettings,
+    cached: ConfigPushRequest,
+) -> anyhow::Result<RestoreOutcome> {
     let resolved = resolve_and_apply(current, &cached)?;
     Ok((
         resolved.settings,

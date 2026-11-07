@@ -12,6 +12,7 @@ use crate::models::tool_models::deserialize_endpoints;
 use crate::models::ToolEndpoint;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfEditRequest {
     #[serde(alias = "user_message")]
     pub user_message: String,
@@ -30,7 +31,15 @@ pub struct PdfEditRequest {
     pub enabled_endpoints: Vec<ToolEndpoint>,
 }
 
+impl PdfEditRequest {
+    /// Nested `AiFile` entries carry `min_length=1` fields.
+    pub fn validate(&self) -> Result<(), String> {
+        crate::contracts::common::validate_ai_files(&self.files)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EditPlanPayload {
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,12 +51,14 @@ pub struct EditPlanPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EditClarificationPayload {
     pub question: String,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EditCannotDoPayload {
     pub reason: String,
 }

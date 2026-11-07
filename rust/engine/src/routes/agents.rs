@@ -4,7 +4,7 @@
 
 use axum::extract::State;
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Router;
 use schemars::JsonSchema;
 use serde_json::{json, Value};
 
@@ -22,6 +22,7 @@ use crate::contracts::pdf_comments::PdfCommentRequest;
 use crate::contracts::pdf_edit::PdfEditRequest;
 use crate::contracts::pdf_questions::PdfQuestionRequest;
 use crate::error::ApiResult;
+use crate::extract::Json;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {

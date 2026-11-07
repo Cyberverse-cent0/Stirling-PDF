@@ -45,8 +45,14 @@ fn processor_contract_round_trips_every_field() {
         req.rag.embedding_provider,
         r["embeddingProvider"].as_str().unwrap()
     );
-    assert_eq!(req.rag.embedding_model, r["embeddingModel"].as_str().unwrap());
-    assert_eq!(req.rag.embedding_api_key, r["embeddingApiKey"].as_str().unwrap());
+    assert_eq!(
+        req.rag.embedding_model,
+        r["embeddingModel"].as_str().unwrap()
+    );
+    assert_eq!(
+        req.rag.embedding_api_key,
+        r["embeddingApiKey"].as_str().unwrap()
+    );
     assert_eq!(
         req.rag.embedding_base_url,
         r["embeddingBaseUrl"].as_str().unwrap()
@@ -58,7 +64,10 @@ fn processor_contract_round_trips_every_field() {
     );
 
     let limits = &payload["limits"];
-    assert_eq!(req.limits.max_pages, limits["maxPages"].as_u64().map(|v| v as u32));
+    assert_eq!(
+        req.limits.max_pages,
+        limits["maxPages"].as_u64().map(|v| v as u32)
+    );
     assert_eq!(
         req.limits.max_characters,
         limits["maxCharacters"].as_u64().map(|v| v as u32)
@@ -98,9 +107,17 @@ fn processor_contract_has_no_unmapped_keys() {
                 "maxSearches",
             ],
         ),
-        ("limits", &["maxPages", "maxCharacters", "modelMaxConcurrency"]),
+        (
+            "limits",
+            &["maxPages", "maxCharacters", "modelMaxConcurrency"],
+        ),
     ];
-    let top: Vec<&str> = payload.as_object().unwrap().keys().map(String::as_str).collect();
+    let top: Vec<&str> = payload
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
     let mut expected_top: Vec<&str> = expected.iter().map(|(k, _)| *k).collect();
     expected_top.sort_unstable();
     let mut top_sorted = top.clone();

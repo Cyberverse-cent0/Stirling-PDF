@@ -13,6 +13,7 @@ pub enum FolioType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FolioManifest {
     #[serde(alias = "session_id")]
     pub session_id: String,
@@ -28,7 +29,21 @@ fn default_round() -> i64 {
     1
 }
 
+impl FolioManifest {
+    /// `Field(ge=1)`/`le=3` checks from the pydantic contract.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.page_count < 1 {
+            return Err("pageCount must be >= 1".to_string());
+        }
+        if !(1..=3).contains(&self.round) {
+            return Err("round must be between 1 and 3".to_string());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Requisition {
     #[serde(rename = "type")]
     pub kind: RequisitionKind,
@@ -52,6 +67,7 @@ pub enum RequisitionKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Folio {
     pub page: i64,
     #[serde(default)]
@@ -77,6 +93,7 @@ impl Folio {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Evidence {
     #[serde(alias = "session_id")]
     pub session_id: String,
@@ -107,6 +124,7 @@ pub enum Severity {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Discrepancy {
     pub page: i64,
     pub kind: DiscrepancyKind,
@@ -119,6 +137,7 @@ pub struct Discrepancy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Verdict {
     #[serde(rename = "type")]
     pub kind: VerdictKind,

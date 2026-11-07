@@ -9,6 +9,7 @@ use crate::contracts::common::{
 use crate::contracts::pdf_edit::{EditCannotDoPayload, EditPlanPayload};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfQuestionRequest {
     pub question: String,
     #[serde(default)]
@@ -18,7 +19,15 @@ pub struct PdfQuestionRequest {
     pub conversation_history: Vec<ConversationMessage>,
 }
 
+impl PdfQuestionRequest {
+    /// Nested `AiFile` entries carry `min_length=1` fields.
+    pub fn validate(&self) -> Result<(), String> {
+        crate::contracts::common::validate_ai_files(&self.files)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfQuestionAnswerPayload {
     pub answer: String,
     #[serde(default)]
@@ -26,6 +35,7 @@ pub struct PdfQuestionAnswerPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfQuestionNotFoundPayload {
     pub reason: String,
 }

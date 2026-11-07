@@ -244,7 +244,13 @@ now `pub(crate)` and shared) vs documented non-port.
 Blocked on missing crypto stack — see `migration/reports/
 PHASE-06-SECURITY.md` §cryptographic dependency analysis. Options:
 `rasn`+`rasn-cms` for CMS signing/timestamp/validation, `cryptoki`/
-`pkcs11` for hardware, veraPDF binary for verify/validate-compliance.
+`pkcs11` for hardware. ~~veraPDF binary for verify/validate-compliance~~
+— done: `src/verapdf.rs` + `security.rs` drive the veraPDF CLI
+(`verify-pdf` returns per-flavour `PDFVerificationResult` JSON;
+`validate-compliance` passes compliant PDFs through and 422s
+`/errors/compliance-not-met` otherwise; XMP `pdfaid`/`pdfuaid`/WTPDF
+detection mirrors `VeraPDFService`). CLI absent → per-result
+"Validation error" entries, never a proxy.
 No Java fallback exists anymore — this family stays unimplemented
 until a dedicated engine project lands. Do NOT ship visual-only
 approximations.
@@ -390,7 +396,7 @@ Audit: `migration/reports/desktop-phase-b-endpoint-audit.md`.
   `prepare`. Tauri crate: check/clippy/test/fmt clean (90 tests).
 - [x] Phase B — endpoint surface: `endpointconfig::UNSUPPORTED_ENDPOINTS`
   marks the no-route keys (`cert-sign`, `timestamp-pdf`,
-  `validate-signature`, `verify-pdf`, `validate-compliance`, `ingest`,
+  `validate-signature`, `ingest`,
   `restore-pdf-protection`, `orchestrate`, `tools`, `external-api-call`,
   `purview-*`) disabled with `DisableReason::NotSupported` →
   `NOT_SUPPORTED_LOCALLY`; path spellings translate to keys. Engine-gated

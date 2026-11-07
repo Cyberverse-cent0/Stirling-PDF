@@ -87,15 +87,39 @@ pub enum SupportedCapability {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConversationMessage {
     pub role: String,
     pub content: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AiFile {
     pub id: FileId,
     pub name: String,
+}
+
+impl AiFile {
+    /// `id`/`name` are `Field(min_length=1)` in the pydantic contract.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.id.is_empty() {
+            return Err("file.id must not be empty".to_string());
+        }
+        if self.name.is_empty() {
+            return Err("file.name must not be empty".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// `files: list[AiFile]` appears on several request contracts; each entry
+/// must satisfy `AiFile`'s `min_length=1` fields.
+pub fn validate_ai_files(files: &[AiFile]) -> Result<(), String> {
+    for (i, file) in files.iter().enumerate() {
+        file.validate().map_err(|e| format!("files[{i}]: {e}"))?;
+    }
+    Ok(())
 }
 
 pub fn format_conversation_history(history: &[ConversationMessage]) -> String {
@@ -121,6 +145,7 @@ pub fn format_file_names(files: &[AiFile]) -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfTextSelection {
     #[serde(alias = "page_number")]
     pub page_number: Option<i64>,
@@ -128,6 +153,7 @@ pub struct PdfTextSelection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtractedFileText {
     #[serde(alias = "file_name")]
     pub file_name: String,
@@ -136,6 +162,7 @@ pub struct ExtractedFileText {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NeedContentFileRequest {
     pub file: AiFile,
     #[serde(default)]
@@ -146,6 +173,7 @@ pub struct NeedContentFileRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NeedContentResponse {
     pub files: Vec<NeedContentFileRequest>,
     #[serde(alias = "max_pages")]
@@ -159,6 +187,7 @@ pub struct NeedContentResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NeedIngestResponse {
     #[serde(alias = "resume_with")]
     pub resume_with: SupportedCapability,
@@ -171,6 +200,7 @@ pub struct NeedIngestResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ToolOperationStep {
     pub tool: ToolId,
     /// Raw JSON parameters until the typify-generated `tool_params` module lands;
@@ -182,6 +212,7 @@ pub struct ToolOperationStep {
 /// are supplied by the parent `WorkflowArtifact` tag, so the payload carries
 /// only the verdict.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ToolReportArtifactPayload {
     pub report: Verdict,
 }
@@ -194,6 +225,7 @@ pub enum MathAuditorSource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GenerateFileResponse {
     pub content: String,
     pub filename: String,
@@ -276,7 +308,9 @@ pub fn parse_wire_datetime(s: &str) -> Option<DateTime<FixedOffset>> {
 
 /// Serde `deserialize_with` for `Option<DateTime<FixedOffset>>` fields that
 /// must accept the pydantic datetime range (`expires_at` on ingest requests).
-pub fn de_opt_wire_datetime<'de, D>(deserializer: D) -> Result<Option<DateTime<FixedOffset>>, D::Error>
+pub fn de_opt_wire_datetime<'de, D>(
+    deserializer: D,
+) -> Result<Option<DateTime<FixedOffset>>, D::Error>
 where
     D: Deserializer<'de>,
 {

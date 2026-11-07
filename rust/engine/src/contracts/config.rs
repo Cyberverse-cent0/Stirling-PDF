@@ -68,6 +68,7 @@ pub struct ConfigLimitsSection {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ConfigPushRequest {
     #[serde(default)]
     pub models: ConfigModelsSection,
@@ -78,6 +79,7 @@ pub struct ConfigPushRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConfigApplyResponse {
     pub status: String,
     pub provider: String,
@@ -103,4 +105,23 @@ pub struct ConfigApplyResponse {
     pub model_max_concurrency: u32,
     #[serde(default)]
     pub notes: Vec<String>,
+}
+
+impl ConfigPushRequest {
+    /// `Field(ge=...)` ranges from the pydantic contract: rejected with 422
+    /// before anything is applied. `maxSearches` floors at 0 — "no retrieval
+    /// searches" is legitimate.
+    pub fn validate(&self) -> Result<(), String> {
+        let positive = |v: Option<u32>| v.is_none_or(|n| n >= 1);
+        if !positive(self.models.smart_max_tokens)
+            || !positive(self.models.fast_max_tokens)
+            || !positive(self.rag.top_k)
+            || !positive(self.limits.max_pages)
+            || !positive(self.limits.max_characters)
+            || !positive(self.limits.model_max_concurrency)
+        {
+            return Err("numeric fields must be >= 1".to_string());
+        }
+        Ok(())
+    }
 }

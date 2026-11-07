@@ -52,6 +52,10 @@ tasks:
   engine:dev:
     desc: "Start the Rust AI engine (:5001)"
     dir: rust/engine
+    vars:
+      PORT: '{{.PORT | default "5001"}}'
+    env:
+      PORT: '{{.PORT}}'
     cmds:
       - cargo run
 

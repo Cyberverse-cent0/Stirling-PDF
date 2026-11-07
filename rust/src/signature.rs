@@ -469,7 +469,10 @@ impl CertInfo {
     fn key_size(&self) -> usize {
         match &self.key {
             Some(PublicKey::Rsa(k)) => k.n().bits(),
-            _ => 0,
+            Some(PublicKey::P256(_)) => 256,
+            Some(PublicKey::P384(_)) => 384,
+            Some(PublicKey::Ed25519(_)) => 256,
+            None => 0,
         }
     }
 
@@ -1279,7 +1282,10 @@ fn validate_signer(
             populate_cert_fields(result, Some(signer_cert), sig, doc_ts, is_doc_timestamp);
             return;
         }
-        let mut attrs_der = match attrs.to_der() {
+        // RFC 5652 §5.4: the signature input is the DER encoding of the
+        // SignedAttrs SET OF — the [0] IMPLICIT tag on the wire is replaced
+        // by the universal SET tag, which is what `to_der` already emits.
+        match attrs.to_der() {
             Ok(d) => d,
             Err(_) => {
                 result["valid"] = json!(false);
@@ -1287,11 +1293,7 @@ fn validate_signer(
                 populate_cert_fields(result, Some(signer_cert), sig, doc_ts, is_doc_timestamp);
                 return;
             }
-        };
-        if attrs_der.first() == Some(&0x31) {
-            attrs_der[0] = 0xA0;
         }
-        attrs_der
     } else {
         content.to_vec()
     };
@@ -1418,6 +1420,10 @@ mod tests {
     use super::*;
 
     fn validate_fixture(path: &str) -> Vec<Value> {
+        validate_fixture_with_cert(path, None)
+    }
+
+    fn validate_fixture_with_cert(path: &str, cert_path: Option<&str>) -> Vec<Value> {
         let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
         let doc = pdfdoc::load("fixture.pdf", &bytes).unwrap();
         let sigs = extract_signatures(&doc).unwrap();
@@ -1429,8 +1435,12 @@ mod tests {
             .max()
             .unwrap_or(0);
         let covered = max_covered <= 0 || max_covered >= file_len;
+        let custom_cert = cert_path.map(|p| {
+            let pem = std::fs::read(p).unwrap_or_else(|e| panic!("{p}: {e}"));
+            Certificate::from_pem(&pem).unwrap_or_else(|e| panic!("{p}: {e}"))
+        });
         sigs.iter()
-            .map(|s| validate_one_signature(&bytes, s, covered, None, false))
+            .map(|s| validate_one_signature(&bytes, s, covered, custom_cert.as_ref(), false))
             .collect()
     }
 
@@ -1440,9 +1450,14 @@ mod tests {
 
     // Mirrors `DocumentTimestampValidationTest`: a real FreeTSA RFC 3161
     // document timestamp validates, a byte-flipped copy fails the imprint.
+    // The FreeTSA root is not in the Mozilla TLS bundle or typical system
+    // stores, so the fixture's chain is anchored through the endpoint's
+    // `certFile` custom-trust-anchor path — the same mechanism a deployment
+    // uses to trust a private or timestamping CA.
     #[test]
     fn document_timestamp_validates() {
-        let results = validate_fixture(TIMESTAMPED);
+        let results =
+            validate_fixture_with_cert(TIMESTAMPED, Some("tests/fixtures/freetsa-root.pem"));
         assert_eq!(results.len(), 1);
         let r = &results[0];
         assert_eq!(r["valid"], json!(true), "{r}");

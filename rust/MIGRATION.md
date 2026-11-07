@@ -65,7 +65,12 @@ rest. The frontend keeps calling `/api/*`; routing decides who answers.
   (ebook/pdf, pdf/epub).
   `verapdf` is an optional validator, not a
   converter — it is deliberately not probed/gated; the PDF/A endpoint
-  uses it for `strict` enforcement and warn-only checks when present.
+  uses it for `strict` enforcement and warn-only checks when present,
+  and `security/verify-pdf` + `security/validate-compliance` use it for
+  per-flavour validation (`src/verapdf.rs`). Without the CLI those
+  endpoints still answer: verify-pdf returns per-flavour
+  "Validation error" results, validate-compliance fails closed with
+  422 `/errors/compliance-not-met`.
   `get-info-on-pdf` compliance fields are computed locally (no veraPDF);
   the Java compliance service is gone with the proxy.
 - The Java proxy is removed: `handlers/proxy.rs`, `JAVA_BACKEND_URL`,
@@ -73,8 +78,8 @@ rest. The frontend keeps calling `/api/*`; routing decides who answers.
   404; modes needing a PDF renderer or an unported engine return
   explicit `400`/`500` errors instead of forwarding. Remaining
   unimplemented surface: the security crypto family (cert-sign,
-  hardware-signing, timestamp-pdf, validate-signature, verify-pdf,
-  validate-compliance, restore-pdf-protection) and all proprietary/SaaS
+  hardware-signing, timestamp-pdf, validate-signature,
+  restore-pdf-protection) and all proprietary/SaaS
   controllers.
 - The PDFium toolchain is fully removed: no `pdfium-render` dependency,
   no `libpdfium` binary, no C headers, no standalone bindings crate.
@@ -300,7 +305,7 @@ misc/flatten (forms-only), misc/compress-pdf; security/sanitize-pdf.
 | get-info-on-pdf | Medium | Huge Java method (VeraPDF compliance, outlines, structure tree, permissions). Ported; veraPDF `IsPDF/*Compliant` checks are computed locally and report false rather than consulting a validator |
 | sanitize-pdf | Done | All six flags are dictionary surgery on lopdf; field `/AA` walks `/Kids` with a depth cap |
 | add/remove-password, unlock-pdf-forms, validate, security-info extras | Medium/Done | `add-password`, `remove-password`, `prepare-pdf-session` are native in `handlers::passwords` (lopdf encrypt/decrypt + permission flags); `restore-pdf-protection` (jpdfium `copyEncryption`) and `unlock-pdf-forms`' Java-only paths are unrouted → 404 |
-| redact, timestamp-pdf, cert-sign, hardware-signing | Partial/Hard | `redact`, `auto-redact`, `redact-execute` are native (`pdftext::redact` matcher + overlay rectangles; `convertPDFToImage` rasterises via Ghostscript at 300 DPI like Java). `timestamp-pdf` (RFC 3161 TSA), `cert-sign` (CMS), `hardware-signing`, `validate-signature`, `verify-pdf`, `validate-compliance` are unrouted → 404 |
+| redact, timestamp-pdf, cert-sign, hardware-signing | Partial/Hard | `redact`, `auto-redact`, `redact-execute` are native (`pdftext::redact` matcher + overlay rectangles; `convertPDFToImage` rasterises via Ghostscript at 300 DPI like Java). `verify-pdf`, `validate-compliance` are native via the veraPDF CLI (`src/verapdf.rs`). `timestamp-pdf` (RFC 3161 TSA), `cert-sign` (CMS), `hardware-signing`, `validate-signature` are unrouted → 404 |
 
 #### Batch E — ConvertApi (8 controllers)
 

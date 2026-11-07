@@ -69,16 +69,18 @@ static POSTHOG: OnceLock<Option<PostHog>> = OnceLock::new();
 /// Install the PostHog sink from settings; `None`/disabled leaves capture a
 /// no-op. Called once at boot — Python's `setup_posthog_tracking`.
 pub fn init(settings: &AppSettings) {
-    let _ = POSTHOG.set(if settings.posthog_enabled && !settings.posthog_api_key.is_empty() {
-        Some(PostHog {
-            api_key: settings.posthog_api_key.clone(),
-            host: settings.posthog_host.trim_end_matches('/').to_string(),
-            http: reqwest::Client::new(),
-            seen_traces: Mutex::new(HashSet::new()),
-        })
-    } else {
-        None
-    });
+    let _ = POSTHOG.set(
+        if settings.posthog_enabled && !settings.posthog_api_key.is_empty() {
+            Some(PostHog {
+                api_key: settings.posthog_api_key.clone(),
+                host: settings.posthog_host.trim_end_matches('/').to_string(),
+                http: reqwest::Client::new(),
+                seen_traces: Mutex::new(HashSet::new()),
+            })
+        } else {
+            None
+        },
+    );
 }
 
 fn posthog() -> Option<&'static PostHog> {
@@ -161,7 +163,10 @@ pub fn on_llm_response(
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let output_tokens = usage
-        .and_then(|u| u.get("completion_tokens").or_else(|| u.get("output_tokens")))
+        .and_then(|u| {
+            u.get("completion_tokens")
+                .or_else(|| u.get("output_tokens"))
+        })
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let response_model = response
