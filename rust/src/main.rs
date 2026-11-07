@@ -40,6 +40,7 @@ use axum::http::Method;
 use std::time::Duration;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer, ExposeHeaders};
+use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -130,6 +131,11 @@ async fn main() -> anyhow::Result<()> {
                 .allow_credentials(true)
                 .max_age(Duration::from_secs(3600)),
         )
+        // Java's multipart maxRequestSize: the whole request, all parts
+        // combined, is bounded by the same upload limit as each part.
+        .layer(RequestBodyLimitLayer::new(
+            usize::try_from(config.max_upload_bytes).unwrap_or(usize::MAX),
+        ))
         .layer(TraceLayer::new_for_http())
         // Only text-like payloads earn the CPU: PDFs, images, ZIPs and
         // other binary containers are already dense.

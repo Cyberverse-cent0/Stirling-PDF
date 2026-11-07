@@ -94,10 +94,16 @@ parity oracle until it is retired.
 
 ### Planned (not yet ported)
 
-- Agent runtime gaps: `MockModel` test double for scripted agent tests;
-  remaining Python pytest files (agent/route-level behaviour suites
-  under `engine/tests/agents`, `tests/contradiction`, `tests/docparse`,
-  `tests/ledger`, `tests/pdf_comment`).
+- Python test parity continues: pdf-edit agent scenarios (done),
+  tool-description rules (done), Voyage embedding wire shape (done).
+  Still open: `engine/tests/agents/*` (chunked mapper/reasoner, pdf_review,
+  pdf_create, whole_doc_reader), `tests/contradiction`, `tests/ledger`,
+  `tests/pdf_comment`, `test_pdf_question_agent`, `test_user_spec_agent`,
+  `test_reply_language`, `test_documents*`, `test_config_*`,
+  `test_stirling_*`, `test_engine_auth`, `test_model_concurrency`,
+  `test_linked_instance_routes`.
+- `MockModel` test double for scripted agent tests.
+- Java tool-execution wiring for pdf-edit plans.
 - OpenTelemetry beyond request tracing.
 - Python engine retirement once test parity is deemed sufficient.
 

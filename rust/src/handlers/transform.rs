@@ -334,8 +334,7 @@ fn crop_with_ghostscript(
     let output = dir.path().join("output.pdf");
     std::fs::write(&input, &sel_bytes)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("write crop input: {e}")))?;
-    let program = crate::convert::resolve(&crate::settings::engine_program("gs"));
-    let spec = crate::convert::EngineSpec::new(&program)
+    let spec = crate::convert::EngineSpec::new(&crate::settings::engine_program("gs"))
         .args([
             "-dNOPAUSE".to_string(),
             "-dBATCH".to_string(),
@@ -455,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn crop_rejects_remove_data_outside_crop() {
+    fn crop_remove_data_outside_crop_is_supported() {
         let (mut pdf, _) = pdf_with_annots(&[]);
         let bytes = pdf.bytes();
         let params = vec![
@@ -466,9 +465,11 @@ mod tests {
             ("autoCrop".to_string(), "false".to_string()),
             ("removeDataOutsideCrop".to_string(), "true".to_string()),
         ];
-        let error =
-            crop_pdf_work(AppState::new(), HashMap::new(), upload(bytes), params).unwrap_err();
-        assert!(error.to_string().contains("removeDataOutsideCrop"));
+        // Ghostscript distils when present, clip-only otherwise — either
+        // way the request must not be rejected as unsupported.
+        if let Err(error) = crop_pdf_work(AppState::new(), HashMap::new(), upload(bytes), params) {
+            assert!(!error.to_string().contains("removeDataOutsideCrop"), "{error}");
+        }
     }
 
     #[test]

@@ -16,7 +16,6 @@
 //! another job namespace.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -155,18 +154,21 @@ fn now() -> u64 {
 }
 
 pub(crate) fn new_id() -> String {
-    // Java uses UUID.randomUUID(); a time+counter id is collision-free for
-    // this process's lifetime.
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!(
-        "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
-        now(),
-        (n >> 20) & 0xffff,
-        n & 0xfff,
-        ((n << 8) & 0xffff) | 0x8000,
-        n.rotate_left(17)
-    )
+    // Java uses UUID.randomUUID(); job/file ids are bearer credentials for
+    // result downloads, so they must be unguessable, not just unique.
+    use rand::RngExt as _;
+    let mut bytes = [0u8; 16];
+    rand::rng().fill(&mut bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let mut id = String::with_capacity(36);
+    for (i, b) in bytes.iter().enumerate() {
+        if matches!(i, 4 | 6 | 8 | 10) {
+            id.push('-');
+        }
+        id.push_str(&format!("{b:02x}"));
+    }
+    id
 }
 
 /// `?async=true` gate used by migrated handlers. `params` is the multipart

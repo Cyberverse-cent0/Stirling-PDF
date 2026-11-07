@@ -39,10 +39,9 @@ use der::asn1::{
     BitString, BmpString, ObjectIdentifier, OctetString, PrintableStringRef, TeletexStringRef,
     Utf8StringRef,
 };
-use der::{Any, Decode, Encode, Sequence};
+use der::{Any, Decode, Encode, Sequence, Tagged};
 use lopdf::{dictionary, Dictionary, Document, Object, Stream, StringFormat};
 use pkcs8::PrivateKeyInfo;
-use sha2::Digest as _;
 use signature::{Keypair, Signer};
 use spki::{AlgorithmIdentifierOwned, DynSignatureAlgorithmIdentifier, SignatureBitStringEncoding};
 use x509_cert::certificate::Certificate;
@@ -64,6 +63,7 @@ const OID_ENCRYPTED_DATA: &str = "1.2.840.113549.1.7.6";
 const OID_RSA_ENCRYPTION: &str = "1.2.840.113549.1.1.1";
 const OID_ID_EC_PUBLIC_KEY: &str = "1.2.840.10045.2.1";
 const OID_ED25519: &str = "1.3.101.112";
+const OID_SHA256_WITH_RSA: &str = "1.2.840.113549.1.1.11";
 const OID_ECDSA_SHA256: &str = "1.2.840.10045.4.3.2";
 const OID_ECDSA_SHA384: &str = "1.2.840.10045.4.3.3";
 const OID_SHA256_DIGEST: &str = "2.16.840.1.101.3.4.2.1";
@@ -260,6 +260,7 @@ impl SignatureBitStringEncoding for CmsSignature {
 
 /// Verifying-key counterpart kept only to satisfy `Keypair`; never used
 /// for verification here.
+#[derive(Clone)]
 enum AnyVerifyingKey {
     Rsa(rsa::RsaPublicKey),
     P256(p256::ecdsa::VerifyingKey),
@@ -321,7 +322,12 @@ impl Keypair for SigningKey {
 impl DynSignatureAlgorithmIdentifier for SigningKey {
     fn signature_algorithm_identifier(&self) -> spki::Result<AlgorithmIdentifierOwned> {
         match self {
-            Self::Rsa(k) => k.signature_algorithm_identifier(),
+            // rsa's SigningKey has no DynSignatureAlgorithmIdentifier;
+            // BC emits sha256WithRSAEncryption with NULL parameters.
+            Self::Rsa(_) => Ok(AlgorithmIdentifierOwned {
+                oid: oid(OID_SHA256_WITH_RSA),
+                parameters: Some(Any::from_der(&OID_NULL).expect("NULL is valid DER")),
+            }),
             // ecdsa::SigningKey carries no signature-algorithm id; Java
             // emits ecdsa-with-SHA256/384 with absent parameters (RFC 5758).
             Self::P256(_) => Ok(AlgorithmIdentifierOwned {
@@ -342,7 +348,7 @@ impl Signer<CmsSignature> for SigningKey {
         match self {
             Self::Rsa(k) => k
                 .try_sign(msg)
-                .map(|s| CmsSignature(s.as_ref().to_vec())),
+                .map(|s| CmsSignature(signature::SignatureEncoding::to_bytes(&s).to_vec())),
             Self::P256(k) => k.try_sign(msg).and_then(|s| {
                 s.to_der()
                     .map(|d| CmsSignature(d.to_bytes().to_vec()))
@@ -381,9 +387,27 @@ fn public_key_spki_der(key: &SigningKey) -> Option<Vec<u8>> {
             .to_der()
             .ok()
         }
-        AnyVerifyingKey::P256(k) => k.to_public_key_der().ok(),
-        AnyVerifyingKey::P384(k) => k.to_public_key_der().ok(),
-        AnyVerifyingKey::Ed25519(k) => k.to_public_key_der().ok(),
+        AnyVerifyingKey::P256(k) => k.to_public_key_der().ok().map(|d| d.to_vec()),
+        AnyVerifyingKey::P384(k) => k.to_public_key_der().ok().map(|d| d.to_vec()),
+        AnyVerifyingKey::Ed25519(k) => {
+            // ed25519-dalek has no EncodePublicKey; SPKI is
+            // SEQUENCE { OID 1.3.101.112, BIT STRING(32-byte key) }.
+            #[derive(Sequence)]
+            struct SpkiEd25519 {
+                algorithm: AlgorithmIdentifierOwned,
+                subject_public_key: BitString,
+            }
+            SpkiEd25519 {
+                algorithm: AlgorithmIdentifierOwned {
+                    oid: oid(OID_ED25519),
+                    parameters: None,
+                },
+                subject_public_key: BitString::from_bytes(k.as_bytes()).ok()?,
+            }
+            .to_der()
+            .ok()
+            .map(|d| d.to_vec())
+        }
     }
 }
 
@@ -618,7 +642,7 @@ fn private_key_from_pem(bytes: &[u8], password: &str) -> AppResult<SigningKey> {
         }
         "RSA PRIVATE KEY" => {
             use rsa::pkcs1::DecodeRsaPrivateKey as _;
-            let rsa_key = rsa::RsaPrivateKey::from_der(&block.der).map_err(|e| {
+            let rsa_key = rsa::RsaPrivateKey::from_pkcs1_der(&block.der).map_err(|e| {
                 AppError::BadRequest(format!("Invalid argument: PEM private key: {e}"))
             })?;
             Ok(SigningKey::Rsa(rsa::pkcs1v15::SigningKey::from(rsa_key)))
@@ -673,11 +697,21 @@ fn signer_from_private_key_info(pki: &PrivateKeyInfo<'_>) -> AppResult<SigningKe
                 ))),
             }
         }
-        OID_ED25519 => ed25519_dalek::SigningKey::try_from(pki.clone())
-            .map(|k| SigningKey::Ed25519(Ed25519Signer(k)))
-            .map_err(|e| {
-                AppError::BadRequest(format!("Invalid argument: PEM private key: {e}"))
-            }),
+        OID_ED25519 => {
+            // RFC 8410: privateKey is an OCTET STRING wrapping the
+            // 32-byte seed; ed25519-dalek has no PKCS#8 TryFrom.
+            let seed = der::asn1::OctetString::from_der(pki.private_key.as_bytes())
+                .map_err(|e| AppError::BadRequest(format!("Invalid argument: PEM private key: {e}")))?;
+            let bytes: &[u8] = seed.as_bytes();
+            let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+                AppError::BadRequest(
+                    "Invalid argument: PEM private key - Ed25519 seed must be 32 bytes".into(),
+                )
+            })?;
+            Ok(SigningKey::Ed25519(Ed25519Signer(
+                ed25519_dalek::SigningKey::from_bytes(&arr),
+            )))
+        }
         _ => Err(AppError::BadRequest(format!(
             "Invalid argument: PEM private key - unsupported key algorithm {alg}"
         ))),
@@ -705,7 +739,8 @@ enum P12Bag {
 fn pkcs12_safe_bags(bytes: &[u8], password: &str) -> AppResult<Vec<P12Bag>> {
     let pfx = pkcs12::pfx::Pfx::from_der(bytes)
         .map_err(|e| AppError::BadRequest(format!("Invalid argument: PKCS12 keystore: {e}")))?;
-    let auth_safe = decode_sequence_of::<ContentInfo>(content_bytes(&pfx.auth_safe.content)?)
+    let auth_safe_bytes = content_bytes(&pfx.auth_safe.content)?;
+    let auth_safe = decode_sequence_of::<ContentInfo>(&auth_safe_bytes)
         .map_err(|e| AppError::BadRequest(format!("Invalid argument: PKCS12 keystore: {e}")))?;
 
     let mut bags = Vec::new();
@@ -745,7 +780,10 @@ fn content_bytes(content: &Any) -> AppResult<Vec<u8>> {
 
 /// `SEQUENCE OF T` decode: the Any captures the SEQUENCE TLV, its value
 /// is the concatenated element encodings.
-fn decode_sequence_of<'a, T: Decode<'a>>(bytes: &'a [u8]) -> der::Result<Vec<T>> {
+fn decode_sequence_of<T>(bytes: &[u8]) -> der::Result<Vec<T>>
+where
+    T: for<'a> Decode<'a>,
+{
     use der::Reader as _;
     let any = Any::from_der(bytes)?;
     let mut reader = der::SliceReader::new(any.value())?;
@@ -1110,7 +1148,8 @@ fn pbkdf2_derive(
         D: sha2::digest::Digest,
     {
         let mut out = vec![0u8; len];
-        pbkdf2::pbkdf2_hmac::<D>(password, salt, iterations, &mut out);
+        pbkdf2::pbkdf2::<hmac::Hmac<D>>(password, salt, iterations, &mut out)
+            .expect("pbkdf2 output buffer is a multiple of the digest size");
         out
     }
     Ok(match prf_oid {
@@ -1272,7 +1311,7 @@ fn appearance_stream(
     }
     let mut ext_gstate = Dictionary::new();
     ext_gstate.set("BM", "Multiply");
-    ext_gstate.set("ca", Object::Real(0.5));
+    ext_gstate.set("ca", Object::Real(0.5f32));
     resources.set(
         "ExtGState",
         dictionary! { "GS1" => Object::Dictionary(ext_gstate) },

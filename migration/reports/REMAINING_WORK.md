@@ -414,10 +414,9 @@ Audit: `migration/reports/desktop-phase-b-endpoint-audit.md`.
   `task desktop:rust-server` stages the binary and is wired into
   `prepare`. Tauri crate: check/clippy/test/fmt clean (90 tests).
 - [x] Phase B — endpoint surface: `endpointconfig::UNSUPPORTED_ENDPOINTS`
-  marks the no-route keys (`cert-sign`, `timestamp-pdf`,
-  `validate-signature`, `ingest`,
-  `restore-pdf-protection`, `orchestrate`, `tools`, `external-api-call`,
-  `purview-*`) disabled with `DisableReason::NotSupported` →
+  marks the no-route keys (`ingest`, `orchestrate`, `tools`,
+  `external-api-call`, `purview-*`) disabled with
+  `DisableReason::NotSupported` →
   `NOT_SUPPORTED_LOCALLY`; path spellings translate to keys. Engine-gated
   endpoints degrade via `ENGINE_PROBES` group probes. Dead registry keys
   and frontend-composed tools deliberately left enabled (parity + they
