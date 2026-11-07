@@ -216,22 +216,12 @@ impl Default for Security {
 
 /// `security.validation` — PDF signature validation settings, mirroring
 /// Java's `ApplicationProperties.Security.Validation` defaults.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ValidationSettings {
     pub trust: ValidationTrust,
     pub allow_aia: bool,
     pub revocation: ValidationRevocation,
-}
-
-impl Default for ValidationSettings {
-    fn default() -> Self {
-        Self {
-            trust: ValidationTrust::default(),
-            allow_aia: false,
-            revocation: ValidationRevocation::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -153,3 +153,190 @@ pub fn resolve_and_apply(
         notes,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DocumentsBackend;
+    use std::path::PathBuf;
+
+    fn settings() -> AppSettings {
+        AppSettings {
+            smart_model_name: "test".to_string(),
+            fast_model_name: "test".to_string(),
+            chat_provider: String::new(),
+            smart_model_max_tokens: Some(8192),
+            fast_model_max_tokens: Some(2048),
+            model_max_concurrency: 32,
+            documents_backend: DocumentsBackend::Sqlite,
+            documents_sqlite_path: PathBuf::from(":memory:"),
+            documents_pgvector_dsn: String::new(),
+            documents_pgvector_pool_min_size: 1,
+            documents_pgvector_pool_max_size: 10,
+            rag_embedding_model: "voyageai:voyage-4".to_string(),
+            rag_chunk_size: 512,
+            rag_chunk_overlap: 64,
+            rag_default_top_k: 5,
+            rag_max_searches: 5,
+            planner_shortlist_size: 8,
+            documents_reaper_interval_seconds: 60,
+            chunked_reasoner_chars_per_slice: 16_000,
+            chunked_reasoner_concurrency: 10,
+            chunked_reasoner_worker_timeout_seconds: 60.0,
+            chunked_reasoner_notes_char_budget: 250_000,
+            contradiction_detect_concurrency: 5,
+            contradiction_bucket_chunk_size: 12,
+            contradiction_bucket_chunk_overlap: 2,
+            contradiction_canonicaliser_batch_size: 500,
+            max_pages: 200,
+            max_characters: 200_000,
+            require_user_id: false,
+            log_level: "info".to_string(),
+            log_file: String::new(),
+            http_debug: false,
+            posthog_enabled: false,
+            posthog_api_key: String::new(),
+            posthog_host: "https://eu.i.posthog.com".to_string(),
+            engine_shared_secret: String::new(),
+            engine_require_auth: false,
+            allow_config_push: true,
+            config_cache_poll_interval_seconds: 15,
+        }
+    }
+
+    fn push(models: serde_json::Value, rag: serde_json::Value, limits: serde_json::Value) -> ConfigPushRequest {
+        serde_json::from_value(serde_json::json!({
+            "models": models, "rag": rag, "limits": limits
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn anthropic_push_resolves_names_limits_and_chat_creds() {
+        let current = settings();
+        let req = push(
+            serde_json::json!({
+                "provider": "anthropic", "smartModel": "claude-haiku-4-5",
+                "fastModel": "claude-haiku-4-5", "smartMaxTokens": 4096,
+                "fastMaxTokens": 1024, "apiKey": "k", "baseUrl": ""
+            }),
+            serde_json::json!({"topK": 7, "maxSearches": 3}),
+            serde_json::json!({"maxPages": 50, "maxCharacters": 12345, "modelMaxConcurrency": 8}),
+        );
+        let resolved = resolve_and_apply(&current, &req).unwrap();
+        let s = &resolved.settings;
+        assert_eq!(s.smart_model_name, "claude-haiku-4-5");
+        assert_eq!(s.chat_provider, "anthropic");
+        assert_eq!(s.smart_model_max_tokens, Some(4096));
+        assert_eq!(s.rag_default_top_k, 7);
+        assert_eq!(s.max_pages, 50);
+        assert_eq!(s.model_max_concurrency, 8);
+        let chat = resolved.chat.unwrap();
+        assert_eq!(chat.provider.as_deref(), Some("anthropic"));
+        assert_eq!(chat.api_key.as_deref(), Some("k"));
+        assert!(chat.base_url.is_none());
+        assert!(resolved.embedder.is_none());
+        assert!(resolved.notes.is_empty());
+    }
+
+    #[test]
+    fn empty_models_keep_env_values_but_limits_apply() {
+        let current = settings();
+        let req = push(
+            serde_json::json!({"provider": "", "smartModel": "", "fastModel": "",
+                "smartMaxTokens": null, "fastMaxTokens": null, "apiKey": "", "baseUrl": ""}),
+            serde_json::json!({}),
+            serde_json::json!({"maxPages": 50}),
+        );
+        let resolved = resolve_and_apply(&current, &req).unwrap();
+        assert_eq!(resolved.settings.smart_model_name, "test");
+        assert_eq!(resolved.settings.fast_model_name, "test");
+        assert_eq!(resolved.settings.max_pages, 50);
+        assert!(resolved.chat.is_none());
+    }
+
+    #[test]
+    fn first_push_strips_provider_prefix_from_env_names() {
+        let mut current = settings();
+        current.smart_model_name = "anthropic:claude-x".to_string();
+        current.fast_model_name = "openai:gpt-x".to_string();
+        let req = push(
+            serde_json::json!({"provider": "anthropic", "baseUrl": ""}),
+            serde_json::json!({}),
+            serde_json::json!({}),
+        );
+        let resolved = resolve_and_apply(&current, &req).unwrap();
+        assert_eq!(resolved.settings.smart_model_name, "claude-x");
+        assert_eq!(resolved.settings.fast_model_name, "gpt-x");
+    }
+
+    #[test]
+    fn second_push_keeps_colon_bearing_model_name() {
+        // After a push, chat_provider is set and names are bare — a follow-up
+        // push with an empty model must not re-strip "llama3.1:8b" to "8b".
+        let mut current = settings();
+        current.chat_provider = "ollama".to_string();
+        current.smart_model_name = "llama3.1:8b".to_string();
+        current.fast_model_name = "llama3.1:8b".to_string();
+        let req = push(
+            serde_json::json!({"provider": "ollama", "smartModel": "",
+                "fastModel": "", "baseUrl": "http://localhost:11434/v1"}),
+            serde_json::json!({}),
+            serde_json::json!({"maxPages": 42}),
+        );
+        let resolved = resolve_and_apply(&current, &req).unwrap();
+        assert_eq!(resolved.settings.smart_model_name, "llama3.1:8b");
+        assert_eq!(resolved.settings.fast_model_name, "llama3.1:8b");
+        assert_eq!(resolved.settings.max_pages, 42);
+    }
+
+    #[test]
+    fn embedding_push_composes_ref_and_notes_reindex() {
+        let current = settings();
+        let req = push(
+            serde_json::json!({"provider": "anthropic"}),
+            serde_json::json!({
+                "embeddingProvider": "ollama", "embeddingModel": "nomic-embed-text",
+                "embeddingBaseUrl": "http://localhost:11434/v1", "topK": 9
+            }),
+            serde_json::json!({}),
+        );
+        let resolved = resolve_and_apply(&current, &req).unwrap();
+        assert_eq!(resolved.settings.rag_embedding_model, "ollama:nomic-embed-text");
+        assert_eq!(resolved.settings.rag_default_top_k, 9);
+        assert_eq!(resolved.notes.len(), 1);
+        assert!(resolved.notes[0].contains("re-index"));
+        let (model, creds) = resolved.embedder.unwrap();
+        assert_eq!(model, "nomic-embed-text");
+        assert_eq!(creds.provider.as_deref(), Some("ollama"));
+        assert_eq!(creds.base_url.as_deref(), Some("http://localhost:11434/v1"));
+    }
+
+    #[test]
+    fn partial_embedding_push_falls_back_to_current_ref() {
+        let current = settings(); // rag_embedding_model = "voyageai:voyage-4"
+        let req = push(
+            serde_json::json!({}),
+            serde_json::json!({"embeddingApiKey": "new-key"}),
+            serde_json::json!({}),
+        );
+        let resolved = resolve_and_apply(&current, &req).unwrap();
+        assert_eq!(resolved.settings.rag_embedding_model, "voyageai:voyage-4");
+        let (_, creds) = resolved.embedder.unwrap();
+        assert_eq!(creds.provider.as_deref(), Some("voyageai"));
+        assert_eq!(creds.api_key.as_deref(), Some("new-key"));
+    }
+
+    #[test]
+    fn unknown_fields_are_ignored() {
+        let current = settings();
+        let req = serde_json::from_value(serde_json::json!({
+            "futureTopLevelField": {"anything": 1},
+            "models": {"provider": "anthropic", "experimentalFlag": true},
+            "rag": {}, "limits": {}
+        }))
+        .unwrap();
+        let resolved = resolve_and_apply(&current, &req).unwrap();
+        assert_eq!(resolved.settings.chat_provider, "anthropic");
+    }
+}

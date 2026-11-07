@@ -3127,10 +3127,7 @@ fn describe_failure(issue: &Value) -> String {
         .as_str()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| issue["clause"].as_str().filter(|s| !s.trim().is_empty()));
-    let message = truncate_chars(
-        issue["message"].as_str().unwrap_or("").trim(),
-        120,
-    );
+    let message = truncate_chars(issue["message"].as_str().unwrap_or("").trim(), 120);
     match rule_id {
         None => message,
         Some(rule) if message.is_empty() => rule.to_string(),
@@ -3207,10 +3204,12 @@ fn validate_compliance(
 
     let results = verification_results(&bytes);
     let checked: Vec<&Value> = results.iter().filter(|r| is_pdfa_result(r)).collect();
-    let compliant =
-        !checked.is_empty() && checked.iter().all(|r| r["compliant"].as_bool() == Some(true));
+    let compliant = !checked.is_empty()
+        && checked
+            .iter()
+            .all(|r| r["compliant"].as_bool() == Some(true));
     if !compliant {
-        return Err(AppError::Unprocessable(format!(
+        return Err(AppError::ComplianceNotMet(format!(
             "{}; the run was stopped.",
             violation_detail(&checked)
         )));

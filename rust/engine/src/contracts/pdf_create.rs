@@ -68,23 +68,25 @@ where
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DocumentStyle {
     #[serde(default, deserialize_with = "safe_color")]
+    #[serde(alias = "primary_color")]
     pub primary_color: Option<String>,
     #[serde(default, deserialize_with = "safe_color")]
+    #[serde(alias = "background_color")]
     pub background_color: Option<String>,
     #[serde(default, deserialize_with = "safe_color")]
+    #[serde(alias = "body_text_color")]
     pub body_text_color: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GeneratedDocument {
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "reference_number")]
     pub reference_number: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style: Option<DocumentStyle>,
@@ -100,63 +102,74 @@ pub enum SectionDepth {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlannedSection {
     pub heading: String,
     #[serde(rename = "type")]
+    #[serde(alias = "section_type")]
     pub section_type: SectionType,
     pub depth: SectionDepth,
+    #[serde(alias = "key_points")]
     pub key_points: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DocumentMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "cannot_do_reason")]
     pub cannot_do_reason: Option<String>,
     #[serde(default)]
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "reference_number")]
     pub reference_number: Option<String>,
     #[serde(default)]
+    #[serde(alias = "tone_brief")]
     pub tone_brief: String,
     #[serde(default)]
+    #[serde(alias = "shared_terms")]
     pub shared_terms: HashMap<String, String>,
     #[serde(default)]
+    #[serde(alias = "document_context")]
     pub document_context: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "style_primary_color")]
     pub style_primary_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "style_background_color")]
     pub style_background_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "style_body_text_color")]
     pub style_body_text_color: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DocumentSections {
     #[serde(default)]
     pub sections: Vec<PlannedSection>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DocumentPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "cannot_do_reason")]
     pub cannot_do_reason: Option<String>,
     #[serde(default)]
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "reference_number")]
     pub reference_number: Option<String>,
     #[serde(default)]
+    #[serde(alias = "tone_brief")]
     pub tone_brief: String,
     #[serde(default)]
+    #[serde(alias = "shared_terms")]
     pub shared_terms: HashMap<String, String>,
     #[serde(default)]
+    #[serde(alias = "document_context")]
     pub document_context: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style: Option<DocumentStyle>,
@@ -202,21 +215,20 @@ fn safe_hex(v: &str) -> Option<String> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WrittenSections {
     pub sections: Vec<DocumentSection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfCreateRequest {
+    #[serde(alias = "user_message")]
     pub user_message: String,
     #[serde(default)]
+    #[serde(alias = "conversation_history")]
     pub conversation_history: Vec<ConversationMessage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfCreateSuccessPayload {
     pub document: GeneratedDocument,
 }

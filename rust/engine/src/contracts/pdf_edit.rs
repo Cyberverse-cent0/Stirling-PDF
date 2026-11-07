@@ -12,41 +12,42 @@ use crate::models::tool_models::deserialize_endpoints;
 use crate::models::ToolEndpoint;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfEditRequest {
+    #[serde(alias = "user_message")]
     pub user_message: String,
     #[serde(default)]
     pub files: Vec<AiFile>,
     #[serde(default)]
+    #[serde(alias = "conversation_history")]
     pub conversation_history: Vec<ConversationMessage>,
     #[serde(default)]
+    #[serde(alias = "page_text")]
     pub page_text: Vec<ExtractedFileText>,
     /// Java's usable endpoint set; unknown paths are dropped, empty means
     /// "no operations available" (planner returns cannot_do).
     #[serde(default, deserialize_with = "deserialize_endpoints")]
+    #[serde(alias = "enabled_endpoints")]
     pub enabled_endpoints: Vec<ToolEndpoint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EditPlanPayload {
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
     pub steps: Vec<ToolOperationStep>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "resume_with")]
     pub resume_with: Option<SupportedCapability>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EditClarificationPayload {
     pub question: String,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EditCannotDoPayload {
     pub reason: String,
 }

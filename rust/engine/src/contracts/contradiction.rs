@@ -31,7 +31,6 @@ pub enum AnchorQuality {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Claim {
     pub page: i64,
     pub subject: String,
@@ -39,13 +38,14 @@ pub struct Claim {
     pub text: String,
     pub quote: String,
     #[serde(default)]
+    #[serde(alias = "anchor_quality")]
     pub anchor_quality: AnchorQuality,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "file_name")]
     pub file_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Contradiction {
     pub subject: String,
     pub claim1: Claim,
@@ -65,11 +65,11 @@ impl Contradiction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContradictionReport {
     #[serde(default)]
     pub contradictions: Vec<Contradiction>,
     #[serde(default)]
+    #[serde(alias = "pages_examined")]
     pub pages_examined: Vec<i64>,
     pub clean: bool,
     pub summary: String,

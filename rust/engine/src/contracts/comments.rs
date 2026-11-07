@@ -5,8 +5,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CommentSpec {
+    #[serde(alias = "page_index")]
     pub page_index: i64,
     pub x: f64,
     pub y: f64,
@@ -18,5 +18,6 @@ pub struct CommentSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "anchor_text")]
     pub anchor_text: Option<String>,
 }

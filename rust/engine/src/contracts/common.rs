@@ -7,8 +7,9 @@
 //! port relies on typed shapes plus agent-side schema validation; wire-level
 //! range checks are a known parity gap tracked for the contracts phase.
 
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::contracts::ledger::Verdict;
 use crate::models::tool_models::ToolId;
@@ -86,14 +87,12 @@ pub enum SupportedCapability {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConversationMessage {
     pub role: String,
     pub content: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AiFile {
     pub id: FileId,
     pub name: String,
@@ -122,52 +121,56 @@ pub fn format_file_names(files: &[AiFile]) -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfTextSelection {
+    #[serde(alias = "page_number")]
     pub page_number: Option<i64>,
     pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtractedFileText {
+    #[serde(alias = "file_name")]
     pub file_name: String,
     #[serde(default)]
     pub pages: Vec<PdfTextSelection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NeedContentFileRequest {
     pub file: AiFile,
     #[serde(default)]
+    #[serde(alias = "page_numbers")]
     pub page_numbers: Vec<i64>,
+    #[serde(alias = "content_types")]
     pub content_types: Vec<PdfContentType>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NeedContentResponse {
     pub files: Vec<NeedContentFileRequest>,
+    #[serde(alias = "max_pages")]
     pub max_pages: i64,
+    #[serde(alias = "max_characters")]
     pub max_characters: i64,
     // `resume_with`, `reason` and the `outcome` discriminator live on the union.
+    #[serde(alias = "resume_with")]
     pub resume_with: SupportedCapability,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NeedIngestResponse {
+    #[serde(alias = "resume_with")]
     pub resume_with: SupportedCapability,
     pub reason: String,
+    #[serde(alias = "files_to_ingest")]
     pub files_to_ingest: Vec<AiFile>,
     #[serde(default)]
+    #[serde(alias = "content_types")]
     pub content_types: Vec<PdfContentType>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ToolOperationStep {
     pub tool: ToolId,
     /// Raw JSON parameters until the typify-generated `tool_params` module lands;
@@ -179,7 +182,6 @@ pub struct ToolOperationStep {
 /// are supplied by the parent `WorkflowArtifact` tag, so the payload carries
 /// only the verdict.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ToolReportArtifactPayload {
     pub report: Verdict,
 }
@@ -192,7 +194,6 @@ pub enum MathAuditorSource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GenerateFileResponse {
     pub content: String,
     pub filename: String,
@@ -237,3 +238,52 @@ pub enum OrchestratorResponse {
 /// `ArtifactKind`-discriminated artifact union lives in `orchestrator.rs`;
 /// re-exported here so `common` stays the import hub like Python's `__init__`.
 pub use crate::contracts::orchestrator::WorkflowArtifact;
+
+/// Pydantic `datetime` accepts a wider ISO-8601 range than `DateTime`'s
+/// RFC 3339: a space separator, a missing offset (naive → UTC), and a
+/// bare date. Anything else is rejected like pydantic would.
+pub fn parse_wire_datetime(s: &str) -> Option<DateTime<FixedOffset>> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Some(dt);
+    }
+    let normalized;
+    let s = if s.len() > 10 && s.as_bytes()[10] == b' ' {
+        normalized = format!("{}T{}", &s[..10], &s[11..]);
+        normalized.as_str()
+    } else {
+        s
+    };
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Some(dt);
+    }
+    const NAIVE_FORMATS: &[&str] = &[
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+    ];
+    if let Some(ndt) = NAIVE_FORMATS
+        .iter()
+        .find_map(|f| NaiveDateTime::parse_from_str(s, f).ok())
+    {
+        return Some(ndt.and_utc().fixed_offset());
+    }
+    NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|ndt| ndt.and_utc().fixed_offset())
+}
+
+/// Serde `deserialize_with` for `Option<DateTime<FixedOffset>>` fields that
+/// must accept the pydantic datetime range (`expires_at` on ingest requests).
+pub fn de_opt_wire_datetime<'de, D>(deserializer: D) -> Result<Option<DateTime<FixedOffset>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<String>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(s) => parse_wire_datetime(&s)
+            .map(Some)
+            .ok_or_else(|| serde::de::Error::custom(format!("invalid datetime: {s}"))),
+    }
+}

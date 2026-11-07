@@ -37,7 +37,6 @@ use crate::llm::client::LlmClient;
 const LLM_CONCURRENCY: usize = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtractedFigure {
     /// Normalised name, e.g. 'Total Revenue', 'VAT'.
     pub label: String,
@@ -48,14 +47,12 @@ pub struct ExtractedFigure {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FigureExtractionResult {
     #[serde(default)]
     pub figures: Vec<ExtractedFigure>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FormulaCheck {
     /// Human-readable, e.g. 'Line Total = Qty × Unit Price'.
     pub description: String,
@@ -64,41 +61,45 @@ pub struct FormulaCheck {
     /// 'each_row' | 'column_total' | 'single_cell'.
     pub scope: String,
     #[serde(default)]
+    #[serde(alias = "row_range")]
     pub row_range: Option<Vec<i64>>,
     #[serde(default)]
+    #[serde(alias = "target_row")]
     pub target_row: Option<i64>,
     #[serde(default)]
+    #[serde(alias = "target_col")]
     pub target_col: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TableFormulas {
     #[serde(default)]
     pub formulas: Vec<FormulaCheck>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StatementCheck {
     /// The exact text of the claim.
     pub claim: String,
     /// 'percentage_change' | 'comparison' | 'ratio' | 'trend' | 'average' | 'other'.
     pub verification: String,
     #[serde(default)]
+    #[serde(alias = "values_referenced")]
     pub values_referenced: Vec<String>,
     /// What the calculation actually yields.
+    #[serde(alias = "expected_result")]
     pub expected_result: String,
     /// What the text claims.
+    #[serde(alias = "actual_claim")]
     pub actual_claim: String,
     /// True if the claim is correct within tolerance.
+    #[serde(alias = "is_valid")]
     pub is_valid: bool,
     /// One-line working showing the calculation.
     pub explanation: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StatementsResult {
     #[serde(default)]
     pub statements: Vec<StatementCheck>,

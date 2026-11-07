@@ -50,13 +50,13 @@ neutral summary.";
 /// Public-facing notes for a span of pages. Field names are the camelCase
 /// wire form pydantic's `alias_generator=to_camel` produces.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ChunkNotes {
     /// Page numbers covered by these notes (1-indexed).
     pub pages: Vec<i64>,
     /// One- to three-sentence summary of the covered range.
     pub summary: String,
     #[serde(default)]
+    #[serde(alias = "relevant_excerpts")]
     pub relevant_excerpts: Vec<String>,
     #[serde(default)]
     pub facts: Vec<String>,
@@ -65,7 +65,6 @@ pub struct ChunkNotes {
 /// Model output for one extractor call. No `pages` field: page numbers are
 /// mechanical aggregation the wrapper computes deterministically.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
 struct ExtractedNotes {
     summary: String,
     #[serde(default)]

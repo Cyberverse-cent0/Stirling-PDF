@@ -8,9 +8,9 @@ use crate::contracts::common::{ConversationMessage, StepKind};
 use crate::contracts::pdf_edit::{EditCannotDoPayload, EditClarificationPayload};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentDraftStep {
     #[serde(rename = "kind")]
+    #[serde(alias = "step_kind")]
     pub step_kind: DraftStepKind,
     pub title: String,
     pub description: String,
@@ -35,7 +35,6 @@ impl From<StepKind> for DraftStepKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentDraft {
     pub name: String,
     pub description: String,
@@ -45,30 +44,31 @@ pub struct AgentDraft {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentDraftRequest {
+    #[serde(alias = "user_message")]
     pub user_message: String,
     #[serde(default)]
+    #[serde(alias = "conversation_history")]
     pub conversation_history: Vec<ConversationMessage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentDraftResponsePayload {
     pub draft: AgentDraft,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentRevisionRequest {
+    #[serde(alias = "user_message")]
     pub user_message: String,
     #[serde(default)]
+    #[serde(alias = "conversation_history")]
     pub conversation_history: Vec<ConversationMessage>,
+    #[serde(alias = "current_draft")]
     pub current_draft: AgentDraft,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentRevisionResponsePayload {
     pub draft: AgentDraft,
 }

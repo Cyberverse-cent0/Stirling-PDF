@@ -13,10 +13,12 @@ pub enum FolioType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FolioManifest {
+    #[serde(alias = "session_id")]
     pub session_id: String,
+    #[serde(alias = "page_count")]
     pub page_count: i64,
+    #[serde(alias = "folio_types")]
     pub folio_types: Vec<FolioType>,
     #[serde(default = "default_round")]
     pub round: i64,
@@ -27,15 +29,17 @@ fn default_round() -> i64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Requisition {
     #[serde(rename = "type")]
     pub kind: RequisitionKind,
     #[serde(default)]
+    #[serde(alias = "need_text")]
     pub need_text: Vec<i64>,
     #[serde(default)]
+    #[serde(alias = "need_tables")]
     pub need_tables: Vec<i64>,
     #[serde(default)]
+    #[serde(alias = "need_ocr")]
     pub need_ocr: Vec<i64>,
     pub rationale: String,
 }
@@ -48,7 +52,6 @@ pub enum RequisitionKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Folio {
     pub page: i64,
     #[serde(default)]
@@ -56,8 +59,10 @@ pub struct Folio {
     #[serde(default)]
     pub tables: Option<Vec<String>>,
     #[serde(default)]
+    #[serde(alias = "ocr_text")]
     pub ocr_text: Option<String>,
     #[serde(default)]
+    #[serde(alias = "ocr_confidence")]
     pub ocr_confidence: Option<f64>,
 }
 
@@ -72,14 +77,16 @@ impl Folio {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Evidence {
+    #[serde(alias = "session_id")]
     pub session_id: String,
     pub folios: Vec<Folio>,
     pub round: i64,
     #[serde(default)]
+    #[serde(alias = "final_round")]
     pub final_round: bool,
     #[serde(default)]
+    #[serde(alias = "unauditable_pages")]
     pub unauditable_pages: Vec<i64>,
 }
 
@@ -100,7 +107,6 @@ pub enum Severity {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Discrepancy {
     pub page: i64,
     pub kind: DiscrepancyKind,
@@ -113,18 +119,21 @@ pub struct Discrepancy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Verdict {
     #[serde(rename = "type")]
     pub kind: VerdictKind,
+    #[serde(alias = "session_id")]
     pub session_id: String,
     #[serde(default)]
     pub discrepancies: Vec<Discrepancy>,
+    #[serde(alias = "pages_examined")]
     pub pages_examined: Vec<i64>,
+    #[serde(alias = "rounds_taken")]
     pub rounds_taken: i64,
     pub summary: String,
     pub clean: bool,
     #[serde(default)]
+    #[serde(alias = "unauditable_pages")]
     pub unauditable_pages: Vec<i64>,
 }
 

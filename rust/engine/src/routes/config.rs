@@ -38,12 +38,35 @@ fn is_direct_loopback_client(headers: &HeaderMap, client: Option<SocketAddr>) ->
     client.is_some_and(|addr| addr.ip().is_loopback())
 }
 
+/// Contract-level ranges from the Python model (`Field(ge=...)`): rejected
+/// with 422 before anything is applied. `maxSearches` floors at 0 — "no
+/// retrieval searches" is legitimate.
+fn validate_ranges(request: &ConfigPushRequest) -> Result<(), crate::error::ApiError> {
+    let m = &request.models;
+    let r = &request.rag;
+    let l = &request.limits;
+    let positive = |v: Option<u32>| v.is_none_or(|n| n >= 1);
+    if !positive(m.smart_max_tokens)
+        || !positive(m.fast_max_tokens)
+        || !positive(r.top_k)
+        || !positive(l.max_pages)
+        || !positive(l.max_characters)
+        || !positive(l.model_max_concurrency)
+    {
+        return Err(crate::error::ApiError::unprocessable(
+            "numeric fields must be >= 1",
+        ));
+    }
+    Ok(())
+}
+
 async fn apply_config(
     State(state): State<AppState>,
     ConnectInfo(client): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(request): Json<ConfigPushRequest>,
 ) -> ApiResult<Json<ConfigApplyResponse>> {
+    validate_ranges(&request)?;
     let current = state.runtime.load().settings.clone();
     if !current.allow_config_push {
         return Err(crate::error::ApiError::forbidden(

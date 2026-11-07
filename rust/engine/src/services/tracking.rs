@@ -193,9 +193,8 @@ pub fn on_llm_response(
     if let Some(output) = response.get("choices").or_else(|| response.get("content")) {
         properties["$ai_output_choices"] = transform_output_choices(output);
     }
-    let max_tokens = request_body.get("max_tokens");
-    if max_tokens.is_some() {
-        properties["$ai_model_parameters"] = json!({"max_tokens": max_tokens.unwrap()});
+    if let Some(max_tokens) = request_body.get("max_tokens") {
+        properties["$ai_model_parameters"] = json!({"max_tokens": max_tokens});
     }
 
     // One $ai_trace per trace id, emitted ahead of the first generation event.

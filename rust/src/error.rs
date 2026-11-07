@@ -16,6 +16,8 @@ pub enum AppError {
     PayloadTooLarge(String),
     #[error("unprocessable: {0}")]
     Unprocessable(String),
+    #[error("compliance not met: {0}")]
+    ComplianceNotMet(String),
     #[error("forbidden: {0}")]
     Forbidden(String),
     #[error("internal error: {0}")]
@@ -89,6 +91,15 @@ impl IntoResponse for AppError {
                 "/errors/pdf-unrepairable",
                 m.clone(),
             ),
+            // `handleComplianceNotMet`: 422 with the localized title.
+            AppError::ComplianceNotMet(m) => {
+                return problem_response_titled(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "/errors/compliance-not-met",
+                    "Compliance Standard Not Met",
+                    m,
+                );
+            }
             AppError::Forbidden(m) => (StatusCode::FORBIDDEN, "/errors/app-error", m.clone()),
             AppError::Internal(e) => {
                 tracing::error!(error = %e, "internal error");

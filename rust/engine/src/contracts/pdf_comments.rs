@@ -9,7 +9,6 @@ pub const MAX_COMMENT_TEXT_LENGTH: usize = 2_000;
 pub const MAX_CHUNKS_PER_REQUEST: usize = 2_500;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TextChunk {
     pub id: String,
     pub page: i64,
@@ -21,18 +20,20 @@ pub struct TextChunk {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfCommentRequest {
+    #[serde(alias = "session_id")]
     pub session_id: String,
+    #[serde(alias = "user_message")]
     pub user_message: String,
     #[serde(default)]
     pub chunks: Vec<TextChunk>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfCommentInstruction {
+    #[serde(alias = "chunk_id")]
     pub chunk_id: String,
+    #[serde(alias = "comment_text")]
     pub comment_text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
@@ -41,8 +42,8 @@ pub struct PdfCommentInstruction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfCommentResponse {
+    #[serde(alias = "session_id")]
     pub session_id: String,
     #[serde(default)]
     pub comments: Vec<PdfCommentInstruction>,
@@ -50,9 +51,10 @@ pub struct PdfCommentResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PdfCommentReport {
+    #[serde(alias = "annotations_applied")]
     pub annotations_applied: i64,
+    #[serde(alias = "instructions_received")]
     pub instructions_received: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,

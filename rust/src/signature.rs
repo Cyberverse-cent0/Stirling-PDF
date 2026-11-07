@@ -17,12 +17,12 @@ use std::time::SystemTime;
 
 use cms::cert::{CertificateChoices, IssuerAndSerialNumber};
 use cms::content_info::ContentInfo;
-use cms::signed_data::{SignerIdentifier, SignerInfo, SignedData};
+use cms::signed_data::{SignedData, SignerIdentifier, SignerInfo};
 use der::asn1::{ObjectIdentifier, OctetString, Uint};
 use der::{Any, Decode, DecodePem, Encode, Sequence};
+use rsa::traits::PublicKeyParts as _;
 use serde_json::{json, Value};
 use sha2::Digest as _;
-use rsa::traits::PublicKeyParts as _;
 use signature::hazmat::PrehashVerifier;
 use spki::AlgorithmIdentifierOwned;
 use x509_cert::certificate::Certificate;
@@ -56,11 +56,8 @@ const ED25519: &str = "1.3.101.112";
 const EC_PUBLIC_KEY: &str = "1.2.840.10045.2.1";
 const P256_OID: &str = "1.2.840.10045.3.1.7";
 const P384_OID: &str = "1.3.132.0.34";
-const MGF1_WITH_SHA1: &str = "1.2.840.113549.1.1.8";
-const MGF1_WITH_SHA224: &str = "1.2.840.113549.1.1.9";
-const MGF1_WITH_SHA256: &str = "1.2.840.113549.1.1.9.2";
-const MGF1_WITH_SHA384: &str = "1.2.840.113549.1.1.9.3";
-const MGF1_WITH_SHA512: &str = "1.2.840.113549.1.1.9.4";
+const ID_MGF1: &str = "1.2.840.113549.1.1.8";
+const OID_SHA1: &str = "1.3.14.3.2.26";
 
 const OID_MESSAGE_DIGEST_ATTR: &str = "1.2.840.113549.1.9.4";
 const OID_SIGNING_TIME_ATTR: &str = "1.2.840.113549.1.9.5";
@@ -84,16 +81,6 @@ enum DigestKind {
 }
 
 impl DigestKind {
-    fn len(self) -> usize {
-        match self {
-            Self::Sha1 => 20,
-            Self::Sha224 => 28,
-            Self::Sha256 => 32,
-            Self::Sha384 => 48,
-            Self::Sha512 => 64,
-        }
-    }
-
     fn hash(self, msg: &[u8]) -> Vec<u8> {
         match self {
             Self::Sha1 => sha1::Sha1::digest(msg).to_vec(),
@@ -145,9 +132,7 @@ enum PublicKey {
     Ed25519(ed25519_dalek::VerifyingKey),
 }
 
-fn public_key_from_spki(
-    spki: &spki::SubjectPublicKeyInfoOwned,
-) -> Result<PublicKey, String> {
+fn public_key_from_spki(spki: &spki::SubjectPublicKeyInfoOwned) -> Result<PublicKey, String> {
     let alg = spki.algorithm.oid.to_string();
     let bits = spki
         .subject_public_key
@@ -185,15 +170,18 @@ fn public_key_from_spki(
     }
 }
 
-/// `RSASSA-PSS-params` (RFC 4055): hash, mask generator, salt length,
-/// trailer field. Only the fields verification needs are modelled.
+/// `RSASSA-PSS-params` (RFC 4055): context-tagged IMPLICIT fields, each
+/// DEFAULTed — absent means the RFC default (SHA-1, MGF1-SHA1, salt 20,
+/// trailer 1), applied at the use site.
 #[derive(Sequence)]
 struct RsaPssParams {
-    hash_algorithm: AlgorithmIdentifierOwned,
-    mask_gen_algorithm: AlgorithmIdentifierOwned,
-    #[asn1(optional = "true")]
+    #[asn1(context_specific = "0", tag_mode = "IMPLICIT", optional = "true")]
+    hash_algorithm: Option<AlgorithmIdentifierOwned>,
+    #[asn1(context_specific = "1", tag_mode = "IMPLICIT", optional = "true")]
+    mask_gen_algorithm: Option<AlgorithmIdentifierOwned>,
+    #[asn1(context_specific = "2", tag_mode = "IMPLICIT", optional = "true")]
     salt_length: Option<Uint>,
-    #[asn1(optional = "true")]
+    #[asn1(context_specific = "3", tag_mode = "IMPLICIT", optional = "true")]
     trailer_field: Option<Uint>,
 }
 
@@ -209,6 +197,23 @@ fn alg_param_oid(alg: &AlgorithmIdentifierOwned) -> Option<ObjectIdentifier> {
     let params = alg.parameters.as_ref()?;
     let der = params.to_der().ok()?;
     ObjectIdentifier::from_der(&der).ok()
+}
+
+/// `maskGenAlgorithm.parameters` is a `HashAlgorithm` — an
+/// `AlgorithmIdentifier` whose OID names the MGF1 hash.
+fn mgf1_hash(alg: &AlgorithmIdentifierOwned) -> Result<DigestKind, String> {
+    if alg.oid.to_string() != ID_MGF1 {
+        return Err(format!("unsupported MGF algorithm {}", alg.oid));
+    }
+    let Some(params) = &alg.parameters else {
+        return Ok(DigestKind::Sha1);
+    };
+    let der = params
+        .to_der()
+        .map_err(|e| format!("MGF params encode: {e}"))?;
+    let hash_alg =
+        AlgorithmIdentifierOwned::from_der(&der).map_err(|e| format!("MGF params decode: {e}"))?;
+    digest_for_oid(&hash_alg.oid).ok_or_else(|| format!("unsupported MGF1 hash {}", hash_alg.oid))
 }
 
 /// `Ok(true)` verified, `Ok(false)` signature mismatch, `Err` when the
@@ -306,44 +311,48 @@ fn verify_rsa_pss(
     message: &[u8],
     signature: &[u8],
 ) -> Result<bool, String> {
-    // RFC 4055 defaults: SHA-1 hash, MGF1 with the same hash, salt length
-    // equal to the digest length, trailer field 1.
-    let mut hash_oid = digest_alg.map(|a| a.oid.clone());
-    let mut salt_length = None;
-    let mut mgf_oid = None;
+    // RFC 4055: absent `parameters` means every default applies; inside
+    // the params each DEFAULTed field falls back the same way. The CMS
+    // `digestAlgorithm` only stands in when no params are present at all.
+    let mut hash_oid = digest_alg.map(|a| a.oid);
+    let mut mgf = DigestKind::Sha1;
+    let mut salt_length = 20usize;
     if let Some(params) = &sig_alg.parameters {
-        let der = params.to_der().map_err(|e| format!("PSS params encode: {e}"))?;
-        let pss =
-            RsaPssParams::from_der(&der).map_err(|e| format!("PSS params decode: {e}"))?;
+        let der = params
+            .to_der()
+            .map_err(|e| format!("PSS params encode: {e}"))?;
+        let pss = RsaPssParams::from_der(&der).map_err(|e| format!("PSS params decode: {e}"))?;
+        hash_oid = Some(
+            pss.hash_algorithm
+                .as_ref()
+                .map(|a| a.oid)
+                .unwrap_or_else(|| oid(OID_SHA1)),
+        );
+        if let Some(mgf_alg) = &pss.mask_gen_algorithm {
+            mgf = mgf1_hash(mgf_alg)?;
+        }
         if let Some(tf) = &pss.trailer_field {
             if uint_value(tf) != Some(1) {
                 return Err("unsupported PSS trailerField".into());
             }
         }
-        hash_oid = Some(pss.hash_algorithm.oid.clone());
-        mgf_oid = alg_param_oid(&pss.mask_gen_algorithm);
-        salt_length = pss.salt_length.as_ref().and_then(uint_value);
-    }
-    let digest = hash_oid
-        .as_ref()
-        .and_then(digest_for_oid)
-        .unwrap_or(DigestKind::Sha1);
-    // MGF1 must use the same hash as the message digest; a mismatch is
-    // rejected rather than approximated.
-    if let Some(mgf) = mgf_oid {
-        let expected = match digest {
-            DigestKind::Sha1 => MGF1_WITH_SHA1,
-            DigestKind::Sha224 => MGF1_WITH_SHA224,
-            DigestKind::Sha256 => MGF1_WITH_SHA256,
-            DigestKind::Sha384 => MGF1_WITH_SHA384,
-            DigestKind::Sha512 => MGF1_WITH_SHA512,
-        };
-        if mgf.to_string() != expected {
-            return Err("unsupported MGF1 hash for RSASSA-PSS".into());
+        if let Some(sl) = &pss.salt_length {
+            salt_length = uint_value(sl).ok_or_else(|| "PSS saltLength too large".to_string())?;
         }
     }
+    let digest = match &hash_oid {
+        Some(o) => {
+            digest_for_oid(o).ok_or_else(|| format!("unsupported PSS hash algorithm {o}"))?
+        }
+        None => DigestKind::Sha1,
+    };
+    // `rsa::pss::Pss` only supports MGF1 keyed with the message hash, so a
+    // differing MGF hash is rejected rather than approximated.
+    if mgf != digest {
+        return Err("unsupported MGF1 hash for RSASSA-PSS".into());
+    }
     let hashed = digest.hash(message);
-    let salt = salt_length.unwrap_or(digest.len());
+    let salt = salt_length;
     macro_rules! verify {
         ($d:ty) => {
             key.verify(rsa::pss::Pss::new_with_salt::<$d>(salt), &hashed, signature)
@@ -385,23 +394,14 @@ struct CertInfo {
 
 impl CertInfo {
     fn parse(der: &[u8]) -> Result<Self, String> {
-        let cert =
-            Certificate::from_der(der).map_err(|e| format!("certificate decode: {e}"))?;
+        let cert = Certificate::from_der(der).map_err(|e| format!("certificate decode: {e}"))?;
         let tbs = &cert.tbs_certificate;
         let tbs_der = tbs
             .to_der()
             .map_err(|e| format!("tbsCertificate encode: {e}"))?
             .to_vec();
-        let subject = tbs
-            .subject
-            .to_der()
-            .map_err(|e| e.to_string())?
-            .to_vec();
-        let issuer = tbs
-            .issuer
-            .to_der()
-            .map_err(|e| e.to_string())?
-            .to_vec();
+        let subject = tbs.subject.to_der().map_err(|e| e.to_string())?.to_vec();
+        let issuer = tbs.issuer.to_der().map_err(|e| e.to_string())?.to_vec();
         let key = public_key_from_spki(&tbs.subject_public_key_info).ok();
         let key_alg = tbs.subject_public_key_info.algorithm.oid.to_string();
 
@@ -421,17 +421,24 @@ impl CertInfo {
             .ok()
             .flatten()
             .map(|(_, id)| id.0.as_bytes().to_vec());
-        let akid = tbs.get::<AuthorityKeyIdentifier>().ok().flatten().map(|(_, id)| id);
+        let akid = tbs
+            .get::<AuthorityKeyIdentifier>()
+            .ok()
+            .flatten()
+            .map(|(_, id)| id);
 
         Ok(Self {
             subject_name: tbs.subject.to_string(),
             issuer_name: tbs.issuer.to_string(),
-            serial_hex: tbs
-                .serial_number
-                .as_bytes()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect(),
+            // BigInteger.toString(16): no leading zeros, no 0x prefix.
+            serial_hex: {
+                let bytes = tbs.serial_number.as_bytes();
+                let start = bytes
+                    .iter()
+                    .position(|b| *b != 0)
+                    .unwrap_or(bytes.len().saturating_sub(1));
+                bytes[start..].iter().map(|b| format!("{b:02x}")).collect()
+            },
             not_before: tbs.validity.not_before.to_system_time(),
             not_after: tbs.validity.not_after.to_system_time(),
             cert,
@@ -461,7 +468,7 @@ impl CertInfo {
 
     fn key_size(&self) -> usize {
         match &self.key {
-            Some(PublicKey::Rsa(k)) => k.n().bits() as usize,
+            Some(PublicKey::Rsa(k)) => k.n().bits(),
             _ => 0,
         }
     }
@@ -471,7 +478,8 @@ impl CertInfo {
     }
 
     fn key_usages(&self) -> Vec<String> {
-        const LABELS: [(&str, fn(&KeyUsage) -> bool); 9] = [
+        type UsagePredicate = fn(&KeyUsage) -> bool;
+        const LABELS: [(&str, UsagePredicate); 9] = [
             ("Digital Signature", |k| k.digital_signature()),
             ("Non-Repudiation", |k| k.non_repudiation()),
             ("Key Encipherment", |k| k.key_encipherment()),
@@ -740,11 +748,11 @@ fn tst_info_from_signed_data(data: &SignedData) -> Option<TstInfo> {
 }
 
 /// RFC 3161 `id-aa-timeStampToken` unsigned attribute → token genTime.
-fn timestamp_token_gen_time(
-    attrs: Option<&x509_cert::attr::Attributes>,
-) -> Option<SystemTime> {
+fn timestamp_token_gen_time(attrs: Option<&x509_cert::attr::Attributes>) -> Option<SystemTime> {
     let attrs = attrs?;
-    let attr = attrs.iter().find(|a| a.oid == oid(OID_TIMESTAMP_TOKEN_ATTR))?;
+    let attr = attrs
+        .iter()
+        .find(|a| a.oid == oid(OID_TIMESTAMP_TOKEN_ATTR))?;
     let value = attr.values.iter().next()?;
     let content_info = ContentInfo::from_der(&value.to_der().ok()?).ok()?;
     let signed = signed_data_from_content_info(&content_info)?;
@@ -797,6 +805,31 @@ fn text_field(dict: &lopdf::Dictionary, doc: &lopdf::Document, key: &[u8]) -> Op
     lopdf::decode_text_string(resolved).ok()
 }
 
+/// `/ByteRange` as four offsets; any malformed entry yields zeros, which
+/// downstream coverage checks treat as unverifiable.
+fn sig_byte_range(dict: &lopdf::Dictionary, doc: &lopdf::Document) -> [i64; 4] {
+    let parsed = (|| {
+        let br = dict.get(b"ByteRange").ok()?;
+        let (_, resolved) = doc.dereference(br).ok()?;
+        let lopdf::Object::Array(items) = resolved else {
+            return None;
+        };
+        if items.len() != 4 {
+            return None;
+        }
+        let mut out = [0i64; 4];
+        for (i, item) in items.iter().enumerate() {
+            let (_, v) = doc.dereference(item).ok()?;
+            out[i] = v
+                .as_i64()
+                .ok()
+                .or_else(|| v.as_float().ok().map(|f| f as i64))?;
+        }
+        Some(out)
+    })();
+    parsed.unwrap_or([0; 4])
+}
+
 fn collect_signature_dicts(
     doc: &lopdf::Document,
     object: &lopdf::Object,
@@ -817,12 +850,13 @@ fn collect_signature_dicts(
         .and_then(|(_, o)| o.as_name().ok())
         .is_some_and(|n| n == b"Sig");
     if is_sig {
-        if let Ok(v) = dict.get(b"V") {
-            if let Ok((_, resolved)) = doc.dereference(v) {
-                if let lopdf::Object::Dictionary(sig) = resolved {
-                    out.push(sig.clone());
-                }
-            }
+        if let Some(sig) = dict
+            .get(b"V")
+            .ok()
+            .and_then(|v| doc.dereference(v).ok())
+            .and_then(|(_, o)| o.as_dict().ok())
+        {
+            out.push(sig.clone());
         }
     }
     let Some(id) = object.as_reference().ok() else {
@@ -864,36 +898,7 @@ fn extract_signatures(doc: &lopdf::Document) -> AppResult<Vec<PdfSignature>> {
 
     let mut out = Vec::new();
     for dict in dicts {
-        let mut byte_range = [0i64; 4];
-        if let Ok(br) = dict.get(b"ByteRange") {
-            if let Ok((_, resolved)) = doc.dereference(br) {
-                if let lopdf::Object::Array(items) = resolved {
-                    if items.len() == 4 {
-                        let mut ok = true;
-                        for (i, item) in items.iter().enumerate() {
-                            let Ok((_, v)) = doc.dereference(item) else {
-                                ok = false;
-                                break;
-                            };
-                            match v
-                                .as_i64()
-                                .ok()
-                                .or_else(|| v.as_float().ok().map(|f| f as i64))
-                            {
-                                Some(n) => byte_range[i] = n,
-                                None => {
-                                    ok = false;
-                                    break;
-                                }
-                            }
-                        }
-                        if !ok {
-                            byte_range = [0; 4];
-                        }
-                    }
-                }
-            }
-        }
+        let byte_range = sig_byte_range(&dict, doc);
         let contents = dict
             .get(b"Contents")
             .ok()
@@ -939,17 +944,34 @@ fn signed_content(file: &[u8], byte_range: &[i64; 4]) -> Option<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 fn empty_result(covers: bool) -> Value {
+    // Every field Java's `SignatureValidationResult` serializes, so the
+    // JSON shape is stable even on early-exit paths.
     json!({
         "valid": false,
         "chainValid": false,
         "trustValid": false,
+        "chainValidationError": Value::Null,
         "certPathLength": 0,
         "notExpired": false,
         "coversEntireDocument": covers,
         "revocationChecked": false,
         "revocationStatus": "not-checked",
-        "selfSigned": false,
+        "validationTimeSource": Value::Null,
+        "signerName": Value::Null,
+        "signatureDate": Value::Null,
+        "reason": Value::Null,
+        "location": Value::Null,
+        "errorMessage": Value::Null,
+        "issuerDN": Value::Null,
+        "subjectDN": Value::Null,
+        "serialNumber": Value::Null,
+        "validFrom": Value::Null,
+        "validUntil": Value::Null,
+        "signatureAlgorithm": Value::Null,
+        "keySize": 0,
+        "version": Value::Null,
         "keyUsages": [],
+        "selfSigned": false,
     })
 }
 
@@ -959,7 +981,7 @@ fn java_date(st: SystemTime) -> String {
 }
 
 fn parse_pdf_date_offset(raw: &str) -> Option<i64> {
-    let pos = raw.find(|c: char| matches!(c, 'O' | 'o' | '+' | '-' | 'Z' | 'z'))?;
+    let pos = raw.find(['O', 'o', '+', '-', 'Z', 'z'])?;
     let zone = &raw[pos..];
     if zone.starts_with('Z') || zone.starts_with('z') {
         return Some(0);
@@ -970,7 +992,11 @@ fn parse_pdf_date_offset(raw: &str) -> Option<i64> {
         .unwrap_or(zone);
     let (sign, rest) = zone.split_at(1);
     let sign = if sign == "-" { -1i64 } else { 1i64 };
-    let digits: String = rest.chars().filter(|c| c.is_ascii_digit()).take(4).collect();
+    let digits: String = rest
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .take(4)
+        .collect();
     if digits.len() < 4 {
         return None;
     }
@@ -1165,14 +1191,12 @@ fn validate_one_signature(
         let imprint_ok = tst_info_from_signed_data(&signed_data)
             .and_then(|t| {
                 let kind = digest_for_oid(&t.message_imprint.hash_algorithm.oid)?;
-                let covered =
-                    signed_content(file_bytes, &sig.byte_range).unwrap_or_default();
+                let covered = signed_content(file_bytes, &sig.byte_range).unwrap_or_default();
                 Some(kind.hash(&covered) == t.message_imprint.hashed_message.as_bytes())
             })
             .unwrap_or(false);
         if !imprint_ok {
-            result["errorMessage"] =
-                json!("Timestamp message imprint does not match the document");
+            result["errorMessage"] = json!("Timestamp message imprint does not match the document");
             return result;
         }
     }
@@ -1207,9 +1231,7 @@ fn validate_signer(
     revocation_enabled: bool,
 ) {
     let signer_cert = match &signer_info.sid {
-        SignerIdentifier::IssuerAndSerialNumber(isn) => {
-            find_cert_by_issuer_serial(pool, isn)
-        }
+        SignerIdentifier::IssuerAndSerialNumber(isn) => find_cert_by_issuer_serial(pool, isn),
         SignerIdentifier::SubjectKeyIdentifier(skid) => pool
             .iter()
             .find(|c| c.skid.as_deref() == Some(skid.0.as_bytes())),
@@ -1236,10 +1258,8 @@ fn validate_signer(
         let digest_alg = &signer_info.digest_alg;
         let Some(kind) = digest_for_oid(&digest_alg.oid) else {
             result["valid"] = json!(false);
-            result["errorMessage"] = json!(format!(
-                "unsupported digest algorithm {}",
-                digest_alg.oid
-            ));
+            result["errorMessage"] =
+                json!(format!("unsupported digest algorithm {}", digest_alg.oid));
             populate_cert_fields(result, Some(signer_cert), sig, doc_ts, is_doc_timestamp);
             return;
         };
@@ -1255,8 +1275,7 @@ fn validate_signer(
         });
         if !md_ok {
             result["valid"] = json!(false);
-            result["errorMessage"] =
-                json!("messageDigest attribute does not match content");
+            result["errorMessage"] = json!("messageDigest attribute does not match content");
             populate_cert_fields(result, Some(signer_cert), sig, doc_ts, is_doc_timestamp);
             return;
         }
@@ -1265,13 +1284,7 @@ fn validate_signer(
             Err(_) => {
                 result["valid"] = json!(false);
                 result["errorMessage"] = json!("signed attributes encode failed");
-                populate_cert_fields(
-                    result,
-                    Some(signer_cert),
-                    sig,
-                    doc_ts,
-                    is_doc_timestamp,
-                );
+                populate_cert_fields(result, Some(signer_cert), sig, doc_ts, is_doc_timestamp);
                 return;
             }
         };
@@ -1294,8 +1307,7 @@ fn validate_signer(
         Ok(false) => result["valid"] = json!(false),
         Err(e) => {
             result["valid"] = json!(false);
-            result["errorMessage"] =
-                json!(format!("Signature validation failed: {e}"));
+            result["errorMessage"] = json!(format!("Signature validation failed: {e}"));
             populate_cert_fields(result, Some(signer_cert), sig, doc_ts, is_doc_timestamp);
             return;
         }
@@ -1370,7 +1382,8 @@ fn populate_cert_fields(
     result["validUntil"] = json!(java_date(cert.not_after));
     result["signatureAlgorithm"] = json!(cert.sig_alg_name());
     result["keySize"] = json!(cert.key_size());
-    result["version"] = json!(cert.cert.tbs_certificate.version as u8 + 1);
+    // Java serializes `String.valueOf(cert.getVersion())` — a string.
+    result["version"] = json!((cert.cert.tbs_certificate.version as u8 + 1).to_string());
     result["keyUsages"] = json!(cert.key_usages());
     // Java's isSelfSigned also verifies the self-signature; a cert whose
     // issuer equals its subject but fails self-verification is reported
@@ -1398,4 +1411,108 @@ fn find_cert_by_issuer_serial<'a>(
                 .to_der()
                 .is_ok_and(|d| d == isn.serial_number.to_der().unwrap_or_default())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn validate_fixture(path: &str) -> Vec<Value> {
+        let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let doc = pdfdoc::load("fixture.pdf", &bytes).unwrap();
+        let sigs = extract_signatures(&doc).unwrap();
+        assert!(!sigs.is_empty(), "{path}: no signature dictionaries found");
+        let file_len = bytes.len() as i64;
+        let max_covered = sigs
+            .iter()
+            .map(|s| s.byte_range[2] + s.byte_range[3])
+            .max()
+            .unwrap_or(0);
+        let covered = max_covered <= 0 || max_covered >= file_len;
+        sigs.iter()
+            .map(|s| validate_one_signature(&bytes, s, covered, None, false))
+            .collect()
+    }
+
+    const TIMESTAMPED: &str = "../app/core/src/test/resources/timestamp/doc-timestamped.pdf";
+    const TIMESTAMPED_TAMPERED: &str =
+        "../app/core/src/test/resources/timestamp/doc-timestamped-tampered.pdf";
+
+    // Mirrors `DocumentTimestampValidationTest`: a real FreeTSA RFC 3161
+    // document timestamp validates, a byte-flipped copy fails the imprint.
+    #[test]
+    fn document_timestamp_validates() {
+        let results = validate_fixture(TIMESTAMPED);
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+        assert_eq!(r["valid"], json!(true), "{r}");
+        assert_eq!(r["errorMessage"], Value::Null, "{r}");
+        assert_eq!(r["validationTimeSource"], json!("document-timestamp"));
+        assert!(r["signatureDate"].is_string(), "{r}");
+        assert!(
+            r["subjectDN"]
+                .as_str()
+                .unwrap_or("")
+                .contains("freetsa.org"),
+            "{r}"
+        );
+        assert_eq!(r["coversEntireDocument"], json!(true));
+    }
+
+    #[test]
+    fn tampered_document_timestamp_fails_imprint() {
+        let results = validate_fixture(TIMESTAMPED_TAMPERED);
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+        assert_eq!(r["valid"], json!(false), "{r}");
+        assert_eq!(
+            r["errorMessage"],
+            json!("Timestamp message imprint does not match the document")
+        );
+    }
+
+    #[test]
+    fn rsa_pss_params_decode() {
+        // RFC 4055 RSASSA-PSS-params: [0] sha256, [1] mgf1-sha256,
+        // [2] salt 32, [3] trailer 1 — all context-tagged IMPLICIT.
+        #[rustfmt::skip]
+        let der: &[u8] = &[
+            0x30, 0x31,
+            0xA0, 0x0D, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00,
+            0xA1, 0x1A, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x08,
+            0x30, 0x0D, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00,
+            0x82, 0x01, 0x20,
+            0x83, 0x01, 0x01,
+        ];
+        let pss = RsaPssParams::from_der(der).unwrap();
+        assert_eq!(
+            pss.hash_algorithm.unwrap().oid,
+            oid("2.16.840.1.101.3.4.2.1")
+        );
+        let mgf = pss.mask_gen_algorithm.unwrap();
+        assert_eq!(mgf1_hash(&mgf), Ok(DigestKind::Sha256));
+        assert_eq!(uint_value(pss.salt_length.as_ref().unwrap()), Some(32));
+        assert_eq!(uint_value(pss.trailer_field.as_ref().unwrap()), Some(1));
+
+        // Every field DEFAULTed → encoded as an empty SEQUENCE.
+        let empty = RsaPssParams::from_der(&[0x30, 0x00]).unwrap();
+        assert!(empty.hash_algorithm.is_none());
+        assert!(empty.mask_gen_algorithm.is_none());
+        assert!(empty.salt_length.is_none());
+        assert!(empty.trailer_field.is_none());
+    }
+
+    #[test]
+    fn pdf_date_parsing() {
+        let st = pdf_date_to_system_time("D:20240101120000+02'00'").unwrap();
+        assert_eq!(
+            st.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+            1704103200
+        );
+        assert_eq!(
+            pdf_date_millis("D:20240101120000Z").as_deref(),
+            Some("1704110400000")
+        );
+        assert!(pdf_date_to_system_time("not a date").is_none());
+    }
 }

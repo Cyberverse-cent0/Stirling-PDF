@@ -112,15 +112,14 @@ async fn main() -> anyhow::Result<()> {
 /// model/embedder builders need. Model construction is deferred to
 /// `AppState::with_push`, which surfaces provider errors at boot the same
 /// way Python's `build_app_state` does.
-fn restore_cached(
-    current: &AppSettings,
-    cached: ConfigPushRequest,
-) -> anyhow::Result<(
+type RestoreOutcome = (
     AppSettings,
     Option<PushCredentials>,
     Option<(String, PushCredentials)>,
     Vec<String>,
-)> {
+);
+
+fn restore_cached(current: &AppSettings, cached: ConfigPushRequest) -> anyhow::Result<RestoreOutcome> {
     let resolved = resolve_and_apply(current, &cached)?;
     Ok((
         resolved.settings,
@@ -166,7 +165,7 @@ async fn config_watcher(state: AppState) {
             .load()
             .settings
             .config_cache_poll_interval_seconds
-            .max(1) as u64,
+            .max(1),
     );
     let mut ticker = tokio::time::interval(interval);
     ticker.tick().await; // first tick is immediate — skip it

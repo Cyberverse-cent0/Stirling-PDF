@@ -83,8 +83,7 @@ fn random_bytes<const N: usize>() -> [u8; N] {
 /// The Fernet key: HKDF-derived from the shared secret, or a random keyfile
 /// when no secret is configured (modest protection only — same warning path
 /// as Python).
-fn fernet_key(settings: &AppSettings, dir: &Path) -> anyhow::Result<[u8; 32]> {
-    let secret = settings.engine_shared_secret.as_str();
+fn fernet_key(secret: &str, dir: &Path) -> anyhow::Result<[u8; 32]> {
     if !secret.is_empty() {
         return Ok(derive_key_from_secret(secret));
     }
@@ -168,9 +167,12 @@ fn fernet_decrypt(key: &[u8; 32], token: &[u8]) -> anyhow::Result<Vec<u8>> {
 
 /// Encrypt and persist the last-applied pushed config, overwriting any prior file.
 pub fn save_config(settings: &AppSettings, request: &ConfigPushRequest) -> anyhow::Result<()> {
-    let dir = data_dir();
-    fs::create_dir_all(&dir)?;
-    let key = fernet_key(settings, &dir)?;
+    save_config_in(&data_dir(), &settings.engine_shared_secret, request)
+}
+
+fn save_config_in(dir: &Path, secret: &str, request: &ConfigPushRequest) -> anyhow::Result<()> {
+    fs::create_dir_all(dir)?;
+    let key = fernet_key(secret, dir)?;
     let token = fernet_encrypt(&key, &serde_json::to_vec(request)?)?;
     write_private_bytes(&dir.join(CACHE_FILENAME), &token)?;
     Ok(())
@@ -179,7 +181,11 @@ pub fn save_config(settings: &AppSettings, request: &ConfigPushRequest) -> anyho
 /// Identify the current cache file as (mtime_ns, size), or None when absent;
 /// cheap enough to poll.
 pub fn cache_stamp() -> Option<(i64, u64)> {
-    let meta = fs::metadata(data_dir().join(CACHE_FILENAME)).ok()?;
+    cache_stamp_in(&data_dir())
+}
+
+fn cache_stamp_in(dir: &Path) -> Option<(i64, u64)> {
+    let meta = fs::metadata(dir.join(CACHE_FILENAME)).ok()?;
     let mtime = meta
         .modified()
         .ok()?
@@ -192,10 +198,13 @@ pub fn cache_stamp() -> Option<(i64, u64)> {
 /// Load + decrypt the persisted config; returns None (never fails loudly)
 /// when absent, corrupt, or the key is wrong.
 pub fn load_config(settings: &AppSettings) -> Option<ConfigPushRequest> {
-    let dir = data_dir();
+    load_config_in(&data_dir(), &settings.engine_shared_secret)
+}
+
+fn load_config_in(dir: &Path, secret: &str) -> Option<ConfigPushRequest> {
     let cache_path = dir.join(CACHE_FILENAME);
     let token = fs::read(&cache_path).ok()?;
-    let key = match fernet_key(settings, &dir) {
+    let key = match fernet_key(secret, dir) {
         Ok(k) => k,
         Err(e) => {
             tracing::warn!("AI config cache key unavailable: {e}");
@@ -260,5 +269,129 @@ mod tests {
         // Wrong key must fail the HMAC check, not panic.
         let other = random_bytes::<32>();
         assert!(fernet_decrypt(&other, &token).is_err());
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use crate::contracts::config::{ConfigLimitsSection, ConfigModelsSection, ConfigRagSection};
+
+    fn sample() -> ConfigPushRequest {
+        serde_json::from_value(serde_json::json!({
+            "models": {
+                "provider": "anthropic",
+                "smartModel": "claude-haiku-4-5",
+                "fastModel": "claude-haiku-4-5",
+                "smartMaxTokens": 8192,
+                "fastMaxTokens": 2048,
+                "apiKey": "secret-key-value",
+                "baseUrl": ""
+            },
+            "rag": {
+                "embeddingProvider": "voyageai",
+                "embeddingModel": "voyage-4",
+                "embeddingApiKey": "embed-secret",
+                "embeddingBaseUrl": "",
+                "topK": 20,
+                "maxSearches": 5
+            },
+            "limits": {"maxPages": 200, "maxCharacters": 200000, "modelMaxConcurrency": 32}
+        }))
+        .unwrap()
+    }
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "stirling-cache-test-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn roundtrip_with_shared_secret() {
+        let dir = tmpdir("secret");
+        let req = sample();
+        save_config_in(&dir, "the-shared-secret", &req).unwrap();
+        // HKDF-from-secret path: no keyfile is written.
+        assert!(!dir.join(KEY_FILENAME).exists());
+        let loaded = load_config_in(&dir, "the-shared-secret").unwrap();
+        assert_eq!(serde_json::to_value(&loaded).unwrap(), serde_json::to_value(&req).unwrap());
+        // Secrets are encrypted at rest.
+        let raw = fs::read(dir.join(CACHE_FILENAME)).unwrap();
+        assert!(!raw.windows(b"secret-key-value".len()).any(|w| w == b"secret-key-value"));
+    }
+
+    #[test]
+    fn roundtrip_with_keyfile_when_no_secret() {
+        let dir = tmpdir("keyfile");
+        let req = sample();
+        save_config_in(&dir, "", &req).unwrap();
+        assert!(dir.join(KEY_FILENAME).exists());
+        assert!(load_config_in(&dir, "").is_some());
+    }
+
+    #[test]
+    fn load_missing_returns_none() {
+        let dir = tmpdir("missing");
+        assert!(load_config_in(&dir, "s").is_none());
+    }
+
+    #[test]
+    fn load_corrupt_returns_none() {
+        let dir = tmpdir("corrupt");
+        fs::write(dir.join(CACHE_FILENAME), b"not-a-valid-fernet-token").unwrap();
+        assert!(load_config_in(&dir, "a-secret").is_none());
+    }
+
+    #[test]
+    fn wrong_key_returns_none() {
+        let dir = tmpdir("wrongkey");
+        save_config_in(&dir, "secret-a", &sample()).unwrap();
+        assert!(load_config_in(&dir, "secret-b").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_and_keyfile_are_owner_only() {
+        let dir = tmpdir("perms");
+        save_config_in(&dir, "", &sample()).unwrap();
+        for name in [CACHE_FILENAME, KEY_FILENAME] {
+            let mode = fs::metadata(dir.join(name)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{name} is {mode:o}");
+        }
+    }
+
+    #[test]
+    fn save_leaves_no_temp_file_behind() {
+        let dir = tmpdir("tmpfile");
+        save_config_in(&dir, "the-shared-secret", &sample()).unwrap();
+        save_config_in(&dir, "the-shared-secret", &sample()).unwrap();
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
+        assert!(load_config_in(&dir, "the-shared-secret").is_some());
+    }
+
+    #[test]
+    fn cache_stamp_tracks_writes() {
+        let dir = tmpdir("stamp");
+        assert!(cache_stamp_in(&dir).is_none());
+        save_config_in(&dir, "the-shared-secret", &sample()).unwrap();
+        let first = cache_stamp_in(&dir);
+        assert!(first.is_some());
+
+        let mut bigger = sample();
+        bigger.models.smart_model =
+            "claude-haiku-4-5-with-a-much-longer-name-so-the-size-differs".to_string();
+        save_config_in(&dir, "the-shared-secret", &bigger).unwrap();
+        assert_ne!(cache_stamp_in(&dir), first);
     }
 }

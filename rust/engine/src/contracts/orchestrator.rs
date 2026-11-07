@@ -32,22 +32,25 @@ pub enum MathAuditorSourceTag {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OrchestratorRequest {
+    #[serde(alias = "user_message")]
     pub user_message: String,
     #[serde(default)]
     pub files: Vec<AiFile>,
     #[serde(default)]
+    #[serde(alias = "conversation_history")]
     pub conversation_history: Vec<ConversationMessage>,
     #[serde(default)]
     pub artifacts: Vec<WorkflowArtifact>,
     #[serde(default)]
+    #[serde(alias = "resume_with")]
     pub resume_with: Option<SupportedCapability>,
     /// Reply language (IETF tag); unset falls back to the message's own language.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locale: Option<String>,
     /// See `PdfEditRequest.enabled_endpoints`; unknown paths are dropped.
     #[serde(default, deserialize_with = "deserialize_endpoints")]
+    #[serde(alias = "enabled_endpoints")]
     pub enabled_endpoints: Vec<ToolEndpoint>,
 }
 
