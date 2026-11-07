@@ -1,0 +1,187 @@
+name: Rust Release
+
+# Builds the standalone Rust binaries and attaches them to the GitHub
+# Release for the tag. Runs on `release: published` (the normal path —
+# create a release in the UI and this fills it) and on demand via
+# workflow_dispatch, which builds for the dispatching ref and uploads to
+# a `v<version>` release (created if missing).
+#
+# Artifacts per platform:
+#   stirling-server-<target>.tar.gz   (rust/ — the PDF backend)
+#   stirling-engine-<target>.tar.gz   (rust/engine/ — the AI engine)
+#
+# Windows gets .zip archives. macOS and Linux get tar.gz containing the
+# bare binary; engine sidecars (gs, qpdf, ...) are intentionally not
+# bundled — deployments install them via the package manager, matching
+# DEPLOYMENT.md.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (without the v prefix), e.g. 0.2.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rust-release-${{ github.event.release.tag_name || inputs.version }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - name: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - name: macos-x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            archive: tar.gz
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: |
+            rust
+            rust/engine
+          shared-key: rust-release-${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Build stirling-server
+        run: cargo build --release --locked --manifest-path rust/Cargo.toml --bin stirling-server --target ${{ matrix.target }}
+
+      - name: Build stirling-engine
+        run: cargo build --release --locked --manifest-path rust/engine/Cargo.toml --bin stirling-engine --target ${{ matrix.target }}
+
+      - name: Package archives (unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for bin in stirling-server stirling-engine; do
+            cp "rust/target/${{ matrix.target }}/release/$bin" "dist/$bin"
+            chmod +x "dist/$bin"
+            tar -czf "dist/$bin-${{ matrix.target }}.tar.gz" -C dist "$bin"
+          done
+          ls -la dist/
+
+      - name: Package archives (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force dist | Out-Null
+          foreach ($bin in 'stirling-server', 'stirling-engine') {
+            $exe = "rust/target/${{ matrix.target }}/release/$bin.exe"
+            Copy-Item $exe "dist/$bin.exe"
+            Compress-Archive -Path "dist/$bin.exe" -DestinationPath "dist/$bin-${{ matrix.target }}.zip"
+          }
+          Get-ChildItem dist/
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bins-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish release assets
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Download all bin artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac5ef7f0ff0a1 # v8.0.2
+        with:
+          pattern: bins-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Resolve tag and version
+        id: meta
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "release" ]; then
+            tag="${{ github.event.release.tag_name }}"
+          else
+            tag="v${{ inputs.version }}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Create release if dispatching
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.meta.outputs.tag }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; assets will be replaced."
+          else
+            gh release create "$tag" --title "$tag" --generate-notes --latest=false
+          fi
+
+      - name: Upload binaries to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.meta.outputs.tag }}"
+          shopt -s nullglob
+          files=(release-assets/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No release assets found" >&2
+            exit 1
+          fi
+          gh release upload "$tag" "${files[@]}" --clobber
+          echo "Uploaded ${#files[@]} assets to $tag"
+          gh release view "$tag" --json assets --jq '.assets[].name'
