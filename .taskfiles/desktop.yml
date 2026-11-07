@@ -36,11 +36,25 @@ tasks:
   prepare:
     desc: "Prepare desktop build dependencies"
     deps:
-      - jlink
-      - rust-server
       - task: ":frontend:prepare"
         vars: { MODE: desktop }
       - provisioner
+    cmds:
+      # DESKTOP_BACKEND=java keeps the legacy JAR+JRE path; the default
+      # ships only the stirling-server sidecar (tauri.backend-*.conf.json).
+      - |
+        if [ "${DESKTOP_BACKEND:-rust}" = "java" ]; then
+          task desktop:jlink
+        else
+          task desktop:rust-server
+          task desktop:engines
+        fi
+
+  engines:
+    desc: "Stage tier-1 conversion engines (gs, qpdf, ...) for bundling"
+    dir: src-tauri
+    cmds:
+      - cargo run --release --package stirling-desktop-build -- stage-engines
 
   provisioner:
     desc: "Build Windows installer artifacts"
@@ -65,37 +79,37 @@ tasks:
     ignore_error: true
     cmds:
       # Dev HTTP uses the packaged app origin instead of the Vite origin; keep this out of builds.
-      - npx tauri dev --no-watch --features tauri-plugin-http/unsafe-headers
+      - npx tauri dev --no-watch --features tauri-plugin-http/unsafe-headers --config "src-tauri/tauri.backend-${DESKTOP_BACKEND:-rust}.conf.json"
 
   build:
     desc: "Build Tauri desktop app (production)"
     deps: [prepare]
     cmds:
-      - npx tauri build
+      - npx tauri build --config "src-tauri/tauri.backend-${DESKTOP_BACKEND:-rust}.conf.json"
 
   build:dev:
     desc: "Build Tauri desktop app (dev, no bundling)"
     deps: [prepare]
     cmds:
-      - npx tauri build --no-bundle
+      - npx tauri build --no-bundle --config "src-tauri/tauri.backend-${DESKTOP_BACKEND:-rust}.conf.json"
 
   build:dev:mac:
     desc: "Build Tauri desktop .app bundle (macOS)"
     deps: [prepare]
     cmds:
-      - npx tauri build --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - npx tauri build --bundles app --config "src-tauri/tauri.backend-${DESKTOP_BACKEND:-rust}.conf.json" --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
   build:dev:windows:
     desc: "Build Tauri desktop NSIS installer (Windows)"
     deps: [prepare]
     cmds:
-      - npx tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - npx tauri build --bundles nsis --config "src-tauri/tauri.backend-${DESKTOP_BACKEND:-rust}.conf.json" --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
   build:dev:linux:
     desc: "Build Tauri desktop AppImage (Linux)"
     deps: [prepare]
     cmds:
-      - npx tauri build --bundles appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - npx tauri build --bundles appimage --config "src-tauri/tauri.backend-${DESKTOP_BACKEND:-rust}.conf.json" --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
   test:
     desc: "Run Tauri/Cargo tests"
@@ -183,7 +197,7 @@ tasks:
     cmds:
       - task: jlink:clean
       - cd src-tauri && cargo clean
-      - rm -rf dist build
+      - rm -rf dist build src-tauri/engines src-tauri/binaries/engines
 
   # ============================================================
   # JLink — Build bundled Java runtime for Tauri

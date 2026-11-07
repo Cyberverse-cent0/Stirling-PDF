@@ -19,13 +19,14 @@ fn run() -> Result<(), String> {
         "build-provisioner" if args.is_empty() => build_provisioner(),
         "stage-backend-jar" => stage_backend_jar(&args),
         "stage-rust-server" => stage_rust_server(&args),
+        "stage-engines" => stage_engines(&args),
         "verify-bundled-jre" => verify_bundled_jre(&args),
         _ => Err(usage()),
     }
 }
 
 fn usage() -> String {
-    "Usage: stirling-desktop-build <build-provisioner | stage-backend-jar <source-dir> <dest-dir> [version] | stage-rust-server <source-binary> <dest-dir> | verify-bundled-jre [release-file]>".to_string()
+    "Usage: stirling-desktop-build <build-provisioner | stage-backend-jar <source-dir> <dest-dir> [version] | stage-rust-server <source-binary> <dest-dir> | stage-engines [dest-dir] | verify-bundled-jre [release-file]>".to_string()
 }
 
 fn workspace_dir() -> PathBuf {
@@ -302,6 +303,699 @@ fn verify_bundled_jre(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Tier-1 engine set from `migration/reports/desktop-phase-b-endpoint-audit.md`:
+/// the binaries `endpointconfig::ENGINE_PROBES` and the `EngineSpec` call
+/// sites resolve through `find_executable`'s bundled-dir search.
+const TIER1_ENGINES: &[&str] = &[
+    "gs",
+    "qpdf",
+    "pdftohtml",
+    "rsvg-convert",
+    "inkscape",
+    "unrar",
+    "unar",
+    "bsdtar",
+    "7z",
+    "rar",
+    "tesseract",
+    "magick",
+];
+
+/// glibc core is never bundled: the build host's libc may be newer than a
+/// user's, and the dynamic loader resolves these from the system anyway.
+fn is_glibc_core(name: &str) -> bool {
+    matches!(
+        name,
+        "linux-vdso.so.1"
+            | "linux-gate.so.1"
+            | "ld-linux-x86-64.so.2"
+            | "ld-linux.so.2"
+            | "ld-linux-aarch64.so.1"
+            | "libc.so.6"
+            | "libm.so.6"
+            | "libdl.so.2"
+            | "librt.so.1"
+            | "libpthread.so.0"
+            | "libresolv.so.2"
+            | "libutil.so.1"
+            | "libanl.so.1"
+            | "libthread_db.so.1"
+            | "libmemusage.so"
+            | "libpcprofile.so"
+            | "libSegFault.so"
+            | "libcidn.so.1"
+            | "libcrypt.so.1"
+            | "libBrokenLocale.so.1"
+            | "libnsl.so.1"
+    ) || name.starts_with("libnss_")
+        || name.starts_with("ld-musl-")
+        || name.starts_with("ld64.")
+}
+
+/// Parses `ldd` output into resolved library paths. Lines look like
+/// `\tlibz.so.1 => /lib64/libz.so.1 (0x…)` or bare `/lib64/ld-linux… (0x…)`.
+fn parse_ldd_paths(output: &str) -> Vec<PathBuf> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let path = if let Some((_, rest)) = line.split_once("=>") {
+                rest.split_whitespace().next()?
+            } else {
+                line.split_whitespace().next()?
+            };
+            (path.starts_with('/')).then(|| PathBuf::from(path))
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.is_file()
+        && std::fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+fn find_on_path(program: &str) -> Option<PathBuf> {
+    let dirs = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&dirs) {
+        let candidate = dir.join(program);
+        #[cfg(windows)]
+        let candidates = ["exe", "com", "bat", "cmd"]
+            .iter()
+            .map(|ext| candidate.with_extension(ext))
+            .collect::<Vec<_>>();
+        #[cfg(not(windows))]
+        let candidates = vec![candidate];
+        for path in candidates {
+            if is_executable_file(&path) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn set_executable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o755));
+    }
+    #[cfg(windows)]
+    let _ = path;
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn copy_dir_all(source: &Path, dest: &Path) -> Result<(), String> {
+    fs::create_dir_all(dest).map_err(|e| format!("Failed to create {}: {e}", dest.display()))?;
+    for entry in
+        fs::read_dir(source).map_err(|e| format!("Failed to read {}: {e}", source.display()))?
+    {
+        let entry =
+            entry.map_err(|e| format!("Failed to read an entry in {}: {e}", source.display()))?;
+        let target = dest.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Failed to inspect {}: {e}", entry.path().display()))?;
+        if file_type.is_dir() {
+            copy_dir_all(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), &target).map_err(|e| {
+                format!(
+                    "Failed to copy {} to {}: {e}",
+                    entry.path().display(),
+                    target.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Stages the Tier-1 engine binaries plus their shared-library closure
+/// into `<dest>/engines`-style layout consumed by `bundle.resources`.
+/// Missing engines only warn: `endpointconfig` probes then disable the
+/// tool group, same as a server without the binary. Always writes
+/// `<dest>/.keep` so the `engines/**/*` resource glob matches even when
+/// nothing was found.
+fn stage_engines(args: &[String]) -> Result<(), String> {
+    if args.len() > 1 {
+        return Err(usage());
+    }
+    let dest = args
+        .first()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_dir().join("engines"));
+    fs::create_dir_all(&dest).map_err(|e| format!("Failed to create {}: {e}", dest.display()))?;
+    clean_engines_dest(&dest)?;
+    fs::create_dir_all(dest.join("lib"))
+        .map_err(|e| format!("Failed to create {}: {e}", dest.display()))?;
+    fs::write(dest.join(".keep"), b"")
+        .map_err(|e| format!("Failed to write {}: {e}", dest.display()))?;
+
+    match std::env::consts::OS {
+        "linux" => stage_engines_linux(&dest)?,
+        "macos" => stage_engines_macos(&dest)?,
+        "windows" => stage_engines_windows(&dest)?,
+        other => eprintln!("warn: unsupported OS '{other}'; engines resolve from PATH only"),
+    }
+
+    stage_ghostscript_share(&dest);
+    stage_tessdata(&dest);
+    mirror_for_dev_sidecar(&dest);
+    println!("done: {}", dest.display());
+    Ok(())
+}
+
+/// Removes previously staged output so re-runs neither collide with nor
+/// ship stale copies of earlier engines (an engine since uninstalled
+/// would otherwise linger, its lib closure already wiped). Only managed
+/// names are touched — `lib/`, `share/`, and files named after a
+/// TIER1 engine (with or without `.exe`) — so `.keep`, `README.md` and
+/// anything unrecognized survive.
+fn clean_engines_dest(dest: &Path) -> Result<(), String> {
+    for entry in
+        fs::read_dir(dest).map_err(|e| format!("Failed to read {}: {e}", dest.display()))?
+    {
+        let entry =
+            entry.map_err(|e| format!("Failed to read an entry in {}: {e}", dest.display()))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let stem = name.strip_suffix(".exe").unwrap_or(name);
+        if name != "lib" && name != "share" && !TIER1_ENGINES.contains(&stem) {
+            continue;
+        }
+        let path = entry.path();
+        let result = if entry
+            .file_type()
+            .map_err(|e| format!("Failed to inspect {}: {e}", path.display()))?
+            .is_dir()
+        {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        result.map_err(|e| format!("Failed to remove {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn stage_engines_linux(dest: &Path) -> Result<(), String> {
+    let mut queue: std::collections::VecDeque<PathBuf> = Default::default();
+    let mut seen: std::collections::HashSet<PathBuf> = Default::default();
+
+    for name in TIER1_ENGINES {
+        let Some(src) = find_on_path(name) else {
+            eprintln!("warn: {name} not found on PATH, skipping");
+            continue;
+        };
+        let src = canonical(&src);
+        let target = dest.join(name);
+        fs::copy(&src, &target).map_err(|e| {
+            format!(
+                "Failed to copy {} to {}: {e}",
+                src.display(),
+                target.display()
+            )
+        })?;
+        set_executable(&target);
+        queue.push_back(target.clone());
+        println!("staged {name} <- {}", src.display());
+    }
+
+    while let Some(file) = queue.pop_front() {
+        let real = canonical(&file);
+        if !seen.insert(real) {
+            continue;
+        }
+        let output = Command::new("ldd").arg(&file).output();
+        let Ok(output) = output else { continue };
+        if !output.status.success() {
+            continue;
+        }
+        for dep in parse_ldd_paths(&String::from_utf8_lossy(&output.stdout)) {
+            let Some(base) = dep.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            if is_glibc_core(&base) || !dep.is_file() {
+                continue;
+            }
+            let dep_real = canonical(&dep);
+            if seen.contains(&dep_real) {
+                continue;
+            }
+            seen.insert(dep_real);
+            let target = dest.join("lib").join(&base);
+            if target.exists() {
+                eprintln!(
+                    "warn: lib basename collision: {} -> {base} (kept first)",
+                    dep.display()
+                );
+                continue;
+            }
+            if let Err(e) = fs::copy(&dep, &target) {
+                eprintln!("warn: cannot copy {}: {e}", dep.display());
+                continue;
+            }
+            set_executable(&target);
+            queue.push_back(target);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn stage_engines_macos(dest: &Path) -> Result<(), String> {
+    let mut queue: std::collections::VecDeque<PathBuf> = Default::default();
+    let mut done: std::collections::HashSet<PathBuf> = Default::default();
+
+    for name in TIER1_ENGINES {
+        let Some(src) = find_on_path(name) else {
+            eprintln!("warn: {name} not found on PATH, skipping");
+            continue;
+        };
+        let src = canonical(&src);
+        let target = dest.join(name);
+        fs::copy(&src, &target).map_err(|e| {
+            format!(
+                "Failed to copy {} to {}: {e}",
+                src.display(),
+                target.display()
+            )
+        })?;
+        set_executable(&target);
+        queue.push_back(target.clone());
+        println!("staged {name} <- {}", src.display());
+    }
+
+    // Deps under the Homebrew prefixes are copied into engines/lib and
+    // every referencing file is rewritten to @loader_path-relative names,
+    // then adhoc re-signed: install_name_tool invalidates signatures and
+    // arm64 requires at least adhoc.
+    while let Some(file) = queue.pop_front() {
+        if !done.insert(file.clone()) {
+            continue;
+        }
+        set_executable(&file);
+        let in_lib = file.parent() == Some(dest.join("lib").as_path());
+        let file_id = command_stdout("otool", &["-D", &file.to_string_lossy()])
+            .and_then(|out| otool_entries(&out).into_iter().next())
+            .unwrap_or_default();
+
+        let deps = command_stdout("otool", &["-L", &file.to_string_lossy()])
+            .map(|out| otool_entries(&out))
+            .unwrap_or_default();
+
+        for dep in deps {
+            if dep.starts_with('@')
+                || dep.starts_with("/usr/lib/")
+                || dep.starts_with("/System/")
+                || dep.starts_with("/usr/libexec/")
+                || !(dep.starts_with("/opt/homebrew/") || dep.starts_with("/usr/local/"))
+            {
+                continue;
+            }
+            let Some(base) = Path::new(&dep)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+            else {
+                continue;
+            };
+            let target = dest.join("lib").join(&base);
+            if !target.exists() {
+                let dep_path = PathBuf::from(&dep);
+                if fs::copy(&dep_path, &target).is_err() {
+                    eprintln!("warn: cannot copy {dep}");
+                    continue;
+                }
+                set_executable(&target);
+                queue.push_back(target.clone());
+            }
+            let rel = if in_lib {
+                format!("@loader_path/{base}")
+            } else {
+                format!("@loader_path/lib/{base}")
+            };
+            let (flag, old) = if !file_id.is_empty() && dep == file_id {
+                ("-id", dep.clone())
+            } else {
+                ("-change", dep.clone())
+            };
+            let _ = Command::new("install_name_tool")
+                .args([flag, &old, &rel, &file.to_string_lossy()])
+                .status();
+        }
+    }
+
+    if Command::new("codesign").arg("--version").output().is_ok() {
+        for entry in walk_files(dest)? {
+            if entry.file_name().is_some_and(|n| n == ".keep") {
+                continue;
+            }
+            let _ = Command::new("codesign")
+                .args(["--force", "--sign", "-", &entry.to_string_lossy()])
+                .status();
+        }
+    }
+    Ok(())
+}
+
+/// Windows engine executable names differ from the unix probe names the
+/// Rust backend uses (`gs` -> `gswin64c`); staged copies are renamed back
+/// to `<probe>.exe` so `find_executable`'s PATHEXT candidates match.
+#[cfg(target_os = "windows")]
+fn windows_engine_exe(name: &str) -> &str {
+    match name {
+        "gs" => "gswin64c",
+        other => other,
+    }
+}
+
+/// The Windows loader only searches the exe's own directory (then
+/// System32/PATH), so each engine lands flat in `engines/` with every DLL
+/// it might need copied next to it. DLLs are collected from the exe's
+/// directory and its `lib`/`bin` siblings — the layout choco/official
+/// installers use. Deps living elsewhere degrade at exec time like an
+/// engine-less install.
+#[cfg(target_os = "windows")]
+fn stage_engines_windows(dest: &Path) -> Result<(), String> {
+    for name in TIER1_ENGINES {
+        let exe_name = windows_engine_exe(name);
+        let found = find_on_path(name).or_else(|| find_on_path(exe_name));
+        let Some(src) = found else {
+            eprintln!("warn: {name} not found on PATH, skipping");
+            continue;
+        };
+        let src = canonical(&src);
+        let target = dest.join(format!("{name}.exe"));
+        fs::copy(&src, &target).map_err(|e| {
+            format!(
+                "Failed to copy {} to {}: {e}",
+                src.display(),
+                target.display()
+            )
+        })?;
+        println!("staged {name} <- {}", src.display());
+
+        let Some(exe_dir) = src.parent() else {
+            continue;
+        };
+        let mut dll_dirs = vec![exe_dir.to_path_buf()];
+        for sibling in ["lib", "bin"] {
+            let dir = exe_dir.join("..").join(sibling);
+            if dir.is_dir() {
+                dll_dirs.push(canonical(&dir));
+            }
+        }
+        let mut dlls = Vec::new();
+        for dir in dll_dirs {
+            collect_dlls(&dir, 0, &mut dlls);
+        }
+        for path in dlls {
+            let Some(base) = path.file_name() else {
+                continue;
+            };
+            let dll_target = dest.join(base);
+            // First wins on basename collisions — same policy as the
+            // Linux closure walk.
+            if dll_target.exists() {
+                continue;
+            }
+            if let Err(e) = fs::copy(&path, &dll_target) {
+                eprintln!("warn: cannot copy {}: {e}", path.display());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Recursive `*.dll` walk, depth-capped: GTK-style installs nest loadable
+/// modules several levels under `lib/` and the loader only finds them
+/// beside the exe if they are flattened into `engines/`.
+#[cfg(target_os = "windows")]
+fn collect_dlls(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
+    const MAX_DEPTH: u32 = 4;
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            collect_dlls(&path, depth + 1, out);
+        } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "dll") {
+            out.push(path);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn stage_engines_windows(_dest: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn stage_engines_macos(_dest: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+/// `otool -L`/`-D` print a `<file>:` header line, then one load command
+/// per line whose first field is the path. Returns just the paths.
+#[cfg(target_os = "macos")]
+fn otool_entries(output: &str) -> Vec<String> {
+    let mut lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.first().is_some_and(|l| l.trim_end().ends_with(':')) {
+        lines.remove(0);
+    }
+    lines
+        .iter()
+        .filter_map(|l| l.split_whitespace().next().map(str::to_string))
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn command_stdout(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(target_os = "macos")]
+fn walk_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in
+            fs::read_dir(&dir).map_err(|e| format!("Failed to read {}: {e}", dir.display()))?
+        {
+            let entry =
+                entry.map_err(|e| format!("Failed to read an entry in {}: {e}", dir.display()))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|e| format!("Failed to inspect {}: {e}", path.display()))?;
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    Ok(files)
+}
+
+/// Copies the Ghostscript share tree (Resource/, lib/, iccprofiles/) when
+/// the build host has one. gs expands GS_LIB itself into Resource/Init,
+/// lib and Resource/Font, so the shell only needs the parent dir.
+fn stage_ghostscript_share(dest: &Path) {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    #[cfg(target_os = "windows")]
+    {
+        // Versioned installs nest under C:\Program Files\gs\gs<ver>\;
+        // `lib` carries the Resource tree on Windows layouts.
+        if let Ok(entries) = fs::read_dir(r"C:\Program Files\gs") {
+            for entry in entries.flatten() {
+                let root = entry.path();
+                candidates.push(root.join("share").join("ghostscript"));
+                candidates.push(root.join("lib"));
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let fixed: &[&str] = if cfg!(target_os = "macos") {
+            &[
+                "/opt/homebrew/share/ghostscript",
+                "/usr/local/share/ghostscript",
+            ]
+        } else {
+            &[
+                "/usr/share/ghostscript",
+                "/usr/local/share/ghostscript",
+                "/opt/homebrew/share/ghostscript",
+            ]
+        };
+        candidates.extend(fixed.iter().map(PathBuf::from));
+        // Versioned layouts nest the tree one level down: distro packages
+        // use /usr/share/ghostscript/<version>/, brew kegs use
+        // <prefix>/Cellar/ghostscript/<version>/share/ghostscript.
+        for keg in [
+            "/opt/homebrew/Cellar/ghostscript",
+            "/usr/local/Cellar/ghostscript",
+        ] {
+            if let Ok(entries) = fs::read_dir(keg) {
+                for entry in entries.flatten() {
+                    candidates.push(entry.path().join("share").join("ghostscript"));
+                }
+            }
+        }
+        if let Ok(entries) = fs::read_dir("/usr/share/ghostscript") {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    candidates.push(entry.path());
+                }
+            }
+        }
+    }
+
+    let Some(src) = candidates
+        .into_iter()
+        .find(|dir| dir.join("Resource").is_dir())
+    else {
+        return;
+    };
+    let target = dest.join("share").join("ghostscript");
+    match copy_dir_all(&src, &target) {
+        Ok(()) => println!("staged ghostscript share <- {}", src.display()),
+        Err(e) => eprintln!("warn: {e}"),
+    }
+}
+
+/// `*.traineddata` files live outside the tesseract binary's package on
+/// most distros; the Rust backend resolves them via `TESSDATA_PREFIX`,
+/// so the staged copy lands in `share/tessdata` next to the ghostscript
+/// tree and the shell exports it the same way as `GS_LIB`.
+fn stage_tessdata(dest: &Path) {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    #[cfg(target_os = "windows")]
+    {
+        for root in [
+            r"C:\Program Files\Tesseract-OCR",
+            r"C:\ProgramData\chocolatey\lib\tesseract",
+        ] {
+            // UB-Mannheim installs tessdata directly under the root;
+            // choco nests it under <pkg>/tools/ or a versioned subdir.
+            candidates.push(PathBuf::from(root).join("tessdata"));
+            if let Ok(entries) = fs::read_dir(root) {
+                for entry in entries.flatten() {
+                    candidates.push(entry.path().join("tessdata"));
+                    candidates.push(entry.path().join("tools").join("tessdata"));
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Some(prefix) = std::env::var_os("TESSDATA_PREFIX") {
+            candidates.push(PathBuf::from(prefix));
+        }
+        // Versioned layouts nest one level down: Debian/Ubuntu ship
+        // <distro>/tesseract-ocr/<ver>/tessdata, this host uses
+        // /usr/share/tesseract/tessdata.
+        for parent in [
+            "/usr/share/tesseract-ocr",
+            "/usr/share/tesseract",
+            "/usr/local/share/tesseract-ocr",
+            "/usr/local/share/tesseract",
+        ] {
+            if let Ok(entries) = fs::read_dir(parent) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() {
+                        candidates.push(entry.path().join("tessdata"));
+                    }
+                }
+            }
+        }
+        for fixed in [
+            "/usr/share/tesseract/tessdata",
+            "/usr/local/share/tessdata",
+            "/opt/homebrew/share/tessdata",
+            "/usr/local/opt/tesseract/share/tessdata",
+        ] {
+            candidates.push(PathBuf::from(fixed));
+        }
+    }
+
+    let Some(src) = candidates.into_iter().find(|dir| has_traineddata(dir)) else {
+        return;
+    };
+    let target = dest.join("share").join("tessdata");
+    if let Err(e) = fs::create_dir_all(&target) {
+        eprintln!("warn: cannot create {}: {e}", target.display());
+        return;
+    }
+    let Ok(entries) = fs::read_dir(&src) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "traineddata") {
+            continue;
+        }
+        let Some(base) = path.file_name() else {
+            continue;
+        };
+        if let Err(e) = fs::copy(&path, target.join(base)) {
+            eprintln!("warn: cannot copy {}: {e}", path.display());
+        }
+    }
+    println!("staged tessdata <- {}", src.display());
+}
+
+fn has_traineddata(dir: &Path) -> bool {
+    dir.is_dir()
+        && fs::read_dir(dir).is_ok_and(|mut entries| {
+            entries.any(|entry| {
+                entry.is_ok_and(|e| e.path().extension().is_some_and(|ext| ext == "traineddata"))
+            })
+        })
+}
+
+/// `tauri dev` runs the sidecar from `src-tauri/binaries/`, where the Rust
+/// resolver looks for `<exe>/engines`; mirror the staged tree there.
+fn mirror_for_dev_sidecar(dest: &Path) {
+    let Some(parent) = dest.parent() else { return };
+    if !parent.file_name().is_some_and(|n| n == "src-tauri") {
+        return;
+    }
+    let dev_dir = parent.join("binaries").join("engines");
+    let _ = fs::remove_dir_all(&dev_dir);
+    match copy_dir_all(dest, &dev_dir) {
+        Ok(()) => println!(
+            "mirrored engines -> {} (dev sidecar lookup)",
+            dev_dir.display()
+        ),
+        Err(e) => eprintln!("warn: {e}"),
+    }
+}
+
 fn parse_java_major(release: &str) -> Option<u32> {
     release.lines().find_map(|line| {
         let value = line.strip_prefix("JAVA_VERSION=")?.trim_matches('"');
@@ -320,7 +1014,10 @@ fn repository_dir() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_java_major, resolve_version, stage_backend_jar, stage_rust_server};
+    use super::{
+        is_glibc_core, parse_java_major, parse_ldd_paths, resolve_version, stage_backend_jar,
+        stage_rust_server,
+    };
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -385,6 +1082,39 @@ mod tests {
         );
         assert!(!destination.join("stirling-pdf-1.2.2.jar").exists());
         assert_eq!(fs::read(destination.join("other.jar")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn parse_ldd_paths_extracts_resolved_libraries() {
+        let ldd = "\tlinux-vdso.so.1 (0x00007ffd)\n\
+                   \tlibz.so.1 => /lib64/libz.so.1 (0x00007f00)\n\
+                   \tlibc.so.6 => /lib64/libc.so.6 (0x00007f01)\n\
+                   \t/lib64/ld-linux-x86-64.so.2 (0x00007f02)\n";
+        let paths = parse_ldd_paths(ldd);
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/lib64/libz.so.1"),
+                PathBuf::from("/lib64/libc.so.6"),
+                PathBuf::from("/lib64/ld-linux-x86-64.so.2"),
+            ]
+        );
+    }
+
+    #[test]
+    fn glibc_core_is_never_bundled() {
+        for name in [
+            "libc.so.6",
+            "libm.so.6",
+            "ld-linux-x86-64.so.2",
+            "libnss_files.so.2",
+            "linux-vdso.so.1",
+        ] {
+            assert!(is_glibc_core(name), "{name} should be excluded");
+        }
+        for name in ["libgs.so.10", "libqpdf.so.30", "libstdc++.so.6"] {
+            assert!(!is_glibc_core(name), "{name} should be bundled");
+        }
     }
 
     #[test]

@@ -34,9 +34,17 @@ pdf-to-video over CVEs).
 - Engine lookup order for every probe and spawn: `customPaths` path →
   per-call `path_dirs` → `STIRLING_ENGINES_DIR` (path-separated list) →
   `<dir-of-stirling-server>/engines/` → `PATH`. The desktop installer
-  bundles tier-1 engines under the app's `engines/` resource dir and the
-  Tauri shell exports it as `STIRLING_ENGINES_DIR`; `<exe>/engines` is
-  the fallback convention for manually staged layouts.
+  bundles tier-1 engines under the app's `engines/` resource dir —
+  staged by `task desktop:engines` (build-tools `stage-engines`, host
+  package-manager binaries plus their shared-library closure) — and the
+  Tauri shell exports it as `STIRLING_ENGINES_DIR` along with the lib
+  search path, `GS_LIB`, and `TESSDATA_PREFIX`; `<exe>/engines` is the
+  fallback convention for manually staged layouts and `tauri dev`.
+  The bundle covers the tier-1 set (`gs`, `qpdf`, `pdftohtml`,
+  `rsvg-convert`, `inkscape`, archive tools, `tesseract` + `tessdata`,
+  `magick`); the heavier engines — `soffice`/`unoconvert`, `weasyprint`,
+  `ocrmypdf`, `ebook-convert`, `verapdf` — still resolve from `PATH` or
+  `customPaths` and disable their tool groups when absent.
 - `system.enableUrlToPDF` must be `true` for url-to-pdf (default off,
   matching Java).
 - `endpoints.toRemove` / `endpoints.groupsToRemove` disable endpoints or

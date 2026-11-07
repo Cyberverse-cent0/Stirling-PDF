@@ -8,3 +8,7 @@ target/
 
 **/stirling_thumbnail_handler.dll
 /node_modules
+
+# Staged engine payloads (task desktop:engines / build-tools stage-engines)
+/engines/*
+!/engines/README.md

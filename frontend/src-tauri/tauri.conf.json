@@ -24,7 +24,7 @@
       "icons/macos/app.icns",
       "icons/macos/app-512.png"
     ],
-    "resources": ["libs/*.jar", "runtime/jre/**/*"],
+    "resources": ["libs/*.jar", "runtime/jre/**/*", "engines/**/*"],
     "fileAssociations": [
       {
         "ext": ["pdf"],

@@ -240,9 +240,10 @@ fn version_key(name: &str) -> (Vec<u64>, u8, Vec<PrereleaseToken>) {
 }
 
 // Find the bundled Rust backend binary. Tauri's `externalBin` mechanism
-// ships it as `stirling-server-<target-triple>[.exe]` next to the
-// resources; `src-tauri/binaries/` covers `tauri dev`, where the
-// resource dir is the target dir and staged sidecars never land.
+// ships it as `stirling-server`/`stirling-server-<target-triple>[.exe]`
+// next to the main executable in packaged installs and under
+// `src-tauri/binaries/` in `tauri dev`; the resource dir and its `bin/`
+// child cover layouts that place sidecars with the resources instead.
 // `STIRLING_SERVER_PATH` pins an explicit binary for development.
 fn find_rust_server(resource_dir: &Path) -> Option<PathBuf> {
     if let Ok(pinned) = std::env::var("STIRLING_SERVER_PATH") {
@@ -261,12 +262,20 @@ fn find_rust_server(resource_dir: &Path) -> Option<PathBuf> {
         "stirling-server"
     };
     let manifest_binaries = Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries");
+    // Tauri ships sidecars next to the main executable (Linux `/usr/bin`,
+    // macOS `Contents/MacOS`), which is neither the resource dir nor its
+    // `bin/` child — without this probe packaged installs fall back to the
+    // JAR path and fail on the missing JRE.
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    let dirs: Vec<PathBuf> = [resource_dir.to_path_buf(), resource_dir.join("bin")]
+        .into_iter()
+        .chain(exe_dir)
+        .chain([manifest_binaries])
+        .collect();
     let mut candidates: Vec<PathBuf> = Vec::new();
-    for dir in [
-        resource_dir.to_path_buf(),
-        resource_dir.join("bin"),
-        manifest_binaries,
-    ] {
+    for dir in dirs {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
@@ -559,16 +568,29 @@ fn run_stirling_server(app: &tauri::AppHandle, server_path: &Path) -> Result<(),
     *BACKEND_SHUTDOWN_FILE.lock().unwrap() = Some(shutdown_file.clone());
 
     // Engines bundled as installer resources live in `<resource>/engines`;
-    // the Rust side searches that dir (and PATH) for gs/qpdf/etc. An empty
-    // value simply contributes no directory.
-    let engines_dir = app
-        .path()
-        .resource_dir()
-        .ok()
-        .map(|dir| dir.join("engines").display().to_string())
+    // the Rust side searches that dir (and PATH) for gs/qpdf/etc. `tauri
+    // dev` stages the same tree under src-tauri/binaries/engines next to
+    // the sidecar copy, so both roots feed the search path.
+    let engines_roots: Vec<PathBuf> = [
+        app.path()
+            .resource_dir()
+            .ok()
+            .map(|dir| dir.join("engines")),
+        Some(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("binaries")
+                .join("engines"),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|dir| dir.is_dir())
+    .collect();
+    let engines_dir = std::env::join_paths(&engines_roots)
+        .map(|joined| joined.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    let sidecar_command = app
+    let mut sidecar_command = app
         .shell()
         .command(server_path.to_str().unwrap())
         .current_dir(&work_dir)
@@ -585,6 +607,61 @@ fn run_stirling_server(app: &tauri::AppHandle, server_path: &Path) -> Result<(),
             "STIRLING_PDF_SHUTDOWN_FILE",
             shutdown_file.to_str().unwrap(),
         );
+
+    // The staged engine binaries carry their shared-library closure in
+    // engines/lib (see build-tools `stage-engines`) — the loader must
+    // search it or every bundled engine fails to exec. GS_LIB points gs
+    // at its staged Resource/Init tree the same way. Both are inherited by spawned engines.
+    if !engines_roots.is_empty() {
+        let lib_dirs: Vec<PathBuf> = engines_roots
+            .iter()
+            .map(|root| root.join("lib"))
+            .filter(|dir| dir.is_dir())
+            .collect();
+        let gs_dirs: Vec<PathBuf> = engines_roots
+            .iter()
+            .map(|root| root.join("share").join("ghostscript"))
+            .filter(|dir| dir.is_dir())
+            .collect();
+        let tessdata_dirs: Vec<PathBuf> = engines_roots
+            .iter()
+            .map(|root| root.join("share").join("tessdata"))
+            .filter(|dir| dir.is_dir())
+            .collect();
+        #[cfg(target_os = "linux")]
+        if !lib_dirs.is_empty() {
+            let mut paths = lib_dirs.clone();
+            if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
+                paths.extend(std::env::split_paths(&existing));
+            }
+            if let Ok(joined) = std::env::join_paths(paths) {
+                sidecar_command = sidecar_command.env("LD_LIBRARY_PATH", joined);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if !lib_dirs.is_empty() {
+            if let Ok(joined) = std::env::join_paths(&lib_dirs) {
+                sidecar_command = sidecar_command.env("DYLD_FALLBACK_LIBRARY_PATH", joined);
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let _ = &lib_dirs;
+        if !gs_dirs.is_empty() {
+            // gs splits GS_LIB on the platform path separator (';' on
+            // Windows), same convention as PATH-style env vars.
+            if let Ok(joined) = std::env::join_paths(&gs_dirs) {
+                sidecar_command = sidecar_command.env("GS_LIB", joined);
+            }
+        }
+        // TESSDATA_PREFIX is the fallback the Rust backend consults after
+        // SYSTEM_TESSDATADIR/settings, so a user-configured tessdata dir
+        // still wins over the bundled one.
+        if !tessdata_dirs.is_empty() {
+            if let Ok(joined) = std::env::join_paths(&tessdata_dirs) {
+                sidecar_command = sidecar_command.env("TESSDATA_PREFIX", joined);
+            }
+        }
+    }
 
     add_log("⚙️ Starting Rust backend sidecar...".to_string());
 
