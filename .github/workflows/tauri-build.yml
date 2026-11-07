@@ -215,9 +215,16 @@ jobs:
       # The bundle ships the stirling-server sidecar plus staged engines;
       # a silent staging miss produces an app that cannot start its backend.
       - name: Verify staged backend artifacts
+        shell: bash
         run: |
           ls frontend/src-tauri/binaries/stirling-server-*
           test -f frontend/src-tauri/engines/.keep
+
+      # brew leaves downloaded bottles behind; the universal app plus staged
+      # engines makes the DMG step disk-hungry, so reclaim it up front.
+      - name: Free disk space (macOS)
+        if: matrix.platform == 'macos-15'
+        run: brew cleanup -s --prune=all
 
       # DigiCert KeyLocker Setup (Cloud HSM)
       - name: Setup DigiCert KeyLocker
@@ -376,6 +383,7 @@ jobs:
           fi
 
       - name: Build Tauri app (signed)
+        id: tauri-signed
         if: env.SIGN_BUNDLE == 'true'
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
@@ -413,6 +421,7 @@ jobs:
           args: ${{ matrix.platform == 'ubuntu-22.04' && (inputs.minimal && '--bundles deb' || '--bundles deb,rpm') || matrix.args }}
 
       - name: Build Tauri app (unsigned)
+        id: tauri-unsigned
         if: env.SIGN_BUNDLE != 'true'
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
@@ -431,6 +440,26 @@ jobs:
           args: >-
             ${{ matrix.platform == 'ubuntu-22.04' && (inputs.minimal && '--bundles deb' || '--bundles deb,rpm') || matrix.args }}
             --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      # bundle_dmg.sh fails intermittently on macOS runners (hdiutil/disk
+      # pressure late in the job). Everything before bundling is cached, so a
+      # single retry is cheap; a second failure still fails the job.
+      - name: Retry Tauri build (macOS bundle flake)
+        if: ${{ !cancelled() && matrix.platform == 'macos-15' && (steps.tauri-signed.outcome == 'failure' || steps.tauri-unsigned.outcome == 'failure') }}
+        working-directory: ./frontend
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ env.SIGN_BUNDLE == 'true' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ env.SIGN_BUNDLE == 'true' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ env.SIGN_BUNDLE == 'true' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ env.SIGN_BUNDLE == 'true' && secrets.APPLE_ID_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ env.SIGN_BUNDLE == 'true' && secrets.APPLE_TEAM_ID || '' }}
+          VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY || 'sb_publishable_UHz2SVRF5mvdrPHWkRteyA_yNlZTkYb' }}
+          VITE_SAAS_SERVER_URL: ${{ secrets.VITE_SAAS_SERVER_URL || 'https://app.stirlingpdf.com' }}
+          VITE_SAAS_BACKEND_API_URL: ${{ secrets.VITE_SAAS_BACKEND_API_URL || 'https://api.stirlingpdf.com' }}
+          CI: true
+        run: npx tauri build ${{ matrix.args }}
 
       # AppImage is decoupled so its linuxdeploy run gets a fresh process
       # (rpm scratch state torn down) and its failure can't tank deb/rpm.

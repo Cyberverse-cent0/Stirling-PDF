@@ -89,17 +89,21 @@ jobs:
       - name: Build stirling-engine
         run: cargo build --release --locked --manifest-path rust/engine/Cargo.toml --bin stirling-engine --target ${{ matrix.target }}
 
+      # rust/engine is its own workspace ([workspace] in its Cargo.toml), so
+      # its artifacts land under rust/engine/target, not the server's
+      # rust/target.
       - name: Package archives (unix)
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-          for bin in stirling-server stirling-engine; do
-            cp "rust/target/${{ matrix.target }}/release/$bin" "dist/$bin"
-            chmod +x "dist/$bin"
-            tar -czf "dist/$bin-${{ matrix.target }}.tar.gz" -C dist "$bin"
-          done
+          cp "rust/target/${{ matrix.target }}/release/stirling-server" "dist/stirling-server"
+          chmod +x "dist/stirling-server"
+          tar -czf "dist/stirling-server-${{ matrix.target }}.tar.gz" -C dist "stirling-server"
+          cp "rust/engine/target/${{ matrix.target }}/release/stirling-engine" "dist/stirling-engine"
+          chmod +x "dist/stirling-engine"
+          tar -czf "dist/stirling-engine-${{ matrix.target }}.tar.gz" -C dist "stirling-engine"
           ls -la dist/
 
       - name: Package archives (windows)
@@ -108,11 +112,10 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force dist | Out-Null
-          foreach ($bin in 'stirling-server', 'stirling-engine') {
-            $exe = "rust/target/${{ matrix.target }}/release/$bin.exe"
-            Copy-Item $exe "dist/$bin.exe"
-            Compress-Archive -Path "dist/$bin.exe" -DestinationPath "dist/$bin-${{ matrix.target }}.zip"
-          }
+          Copy-Item "rust/target/${{ matrix.target }}/release/stirling-server.exe" "dist/stirling-server.exe"
+          Compress-Archive -Path "dist/stirling-server.exe" -DestinationPath "dist/stirling-server-${{ matrix.target }}.zip"
+          Copy-Item "rust/engine/target/${{ matrix.target }}/release/stirling-engine.exe" "dist/stirling-engine.exe"
+          Compress-Archive -Path "dist/stirling-engine.exe" -DestinationPath "dist/stirling-engine-${{ matrix.target }}.zip"
           Get-ChildItem dist/
 
       - name: Upload workflow artifact
@@ -166,7 +169,9 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "Release $tag already exists; assets will be replaced."
           else
-            gh release create "$tag" --title "$tag" --generate-notes --latest=false
+            # --target pins the tag to the dispatched commit; without it gh
+            # tags the default branch HEAD, not the ref this build came from.
+            gh release create "$tag" --title "$tag" --generate-notes --latest=false --target "${{ github.sha }}"
           fi
 
       - name: Upload binaries to release

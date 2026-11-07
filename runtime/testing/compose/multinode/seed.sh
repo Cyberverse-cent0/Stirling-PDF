@@ -70,6 +70,23 @@ set -- $seed_team_ids
 team_count=$#
 log "seedable team ids:$seed_team_ids (count=$team_count)"
 
+# --- rate-limit probe user ---------------------------------------------------
+# Created before the bulk users: the licence seat cap is small enough that
+# filling it first would leave no slot for the one user the rate-limit
+# scenarios actually need. Every user above is ADMIN or USER, both unlimited,
+# so nothing else has a quota to assert on.
+rl_code=$(auth -o /tmp/rluser.json -w '%{http_code}' -X POST "$BASE_URL/api/v1/user/admin/saveUser" \
+  --data-urlencode "username=$RATELIMIT_USER" \
+  --data-urlencode "password=$USER_PASS" \
+  --data-urlencode "role=ROLE_EXTRA_LIMITED_API_USER" \
+  --data-urlencode "authType=WEB" \
+  --data-urlencode "forceChange=false")
+case "$rl_code" in
+  200|201) log "rate-limit probe user created: $RATELIMIT_USER (20 web calls/day)";;
+  409)     log "rate-limit probe user already exists: $RATELIMIT_USER";;
+  *)       fail_note "rate-limit probe user create failed HTTP $rl_code: $(cat /tmp/rluser.json)";;
+esac
+
 # --- users: spread across teams, first two are admins ------------------------
 # The licence caps seats, so USER_COUNT is a target, not a promise: hitting the cap stops the
 # loop and is reported, not counted as a failure. Every other rejection stays fatal.
@@ -112,20 +129,6 @@ if [ -n "$capped" ]; then
 fi
 log "users created: $created (failed: $failed, requested: $USER_COUNT)"
 [ "$failed" -eq 0 ] || fail_note "$failed of $USER_COUNT user creates failed"
-
-# --- rate-limit probe user ---------------------------------------------------
-# Every user above is ADMIN or USER, both unlimited, so nothing else has a quota to assert on.
-rl_code=$(auth -o /tmp/rluser.json -w '%{http_code}' -X POST "$BASE_URL/api/v1/user/admin/saveUser" \
-  --data-urlencode "username=$RATELIMIT_USER" \
-  --data-urlencode "password=$USER_PASS" \
-  --data-urlencode "role=ROLE_EXTRA_LIMITED_API_USER" \
-  --data-urlencode "authType=WEB" \
-  --data-urlencode "forceChange=false")
-case "$rl_code" in
-  200|201) log "rate-limit probe user created: $RATELIMIT_USER (20 web calls/day)";;
-  409)     log "rate-limit probe user already exists: $RATELIMIT_USER";;
-  *)       fail_note "rate-limit probe user create failed HTTP $rl_code: $(cat /tmp/rluser.json)";;
-esac
 
 # --- S3 connection -> the in-cluster Silo 'policy-data' bucket ----------------
 conn_body=$(cat <<JSON

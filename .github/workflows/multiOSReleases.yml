@@ -282,9 +282,16 @@ jobs:
       # The bundle ships the stirling-server sidecar plus staged engines;
       # a silent staging miss produces an app that cannot start its backend.
       - name: Verify staged backend artifacts
+        shell: bash
         run: |
           ls frontend/src-tauri/binaries/stirling-server-*
           test -f frontend/src-tauri/engines/.keep
+
+      # brew leaves downloaded bottles behind; the universal app plus staged
+      # engines makes the DMG step disk-hungry, so reclaim it up front.
+      - name: Free disk space (macOS)
+        if: matrix.platform == 'macos-15'
+        run: brew cleanup -s --prune=all
 
       # DigiCert KeyLocker Setup (Cloud HSM)
       - name: Setup DigiCert KeyLocker
