@@ -756,7 +756,7 @@ fn machine_type() -> &'static str {
 }
 
 /// `TimestampController.TSA_PRESETS`.
-const TSA_PRESETS: &[(&str, &str)] = &[
+pub(crate) const TSA_PRESETS: &[(&str, &str)] = &[
     ("DigiCert", "http://timestamp.digicert.com"),
     ("Sectigo", "http://timestamp.sectigo.com"),
     ("SSL.com", "http://ts.ssl.com"),

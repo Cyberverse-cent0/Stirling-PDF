@@ -60,13 +60,13 @@ fn is_native_raster(bytes: &[u8]) -> bool {
 
 /// A decoded raster ready to embed: flate-compressed samples plus an
 /// optional alpha mask, mirroring `LosslessFactory.createFromImage`.
-struct EmbeddedImage {
-    id: ObjectId,
-    width: u32,
-    height: u32,
+pub(crate) struct EmbeddedImage {
+    pub id: ObjectId,
+    pub width: u32,
+    pub height: u32,
 }
 
-fn embed_image(doc: &mut Document, bytes: &[u8]) -> AppResult<EmbeddedImage> {
+pub(crate) fn embed_image(doc: &mut Document, bytes: &[u8]) -> AppResult<EmbeddedImage> {
     let decoded = image::load_from_memory(bytes)
         .map_err(|_| AppError::BadRequest("image must be a supported image".into()))?;
     let (width, height) = decoded.dimensions();

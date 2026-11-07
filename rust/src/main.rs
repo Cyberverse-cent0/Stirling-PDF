@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod apitests;
 mod attachments;
 mod auth;
 mod config;
@@ -16,6 +18,7 @@ mod jobstore;
 mod metrics;
 mod page_select;
 mod pdfdoc;
+mod pdfua;
 // Port of jpdfium's text model + the proprietary pdf package; not yet
 // routed to a handler, so its public surface is intentionally unused.
 #[allow(dead_code)]
@@ -27,6 +30,7 @@ mod tabula;
 #[cfg(test)]
 mod testkit;
 mod text;
+mod timestamp;
 mod upload;
 mod verapdf;
 mod web;

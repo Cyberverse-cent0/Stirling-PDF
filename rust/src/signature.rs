@@ -19,7 +19,8 @@ use cms::cert::{CertificateChoices, IssuerAndSerialNumber};
 use cms::content_info::ContentInfo;
 use cms::signed_data::{SignedData, SignerIdentifier, SignerInfo};
 use der::asn1::{ObjectIdentifier, OctetString, Uint};
-use der::{Any, Decode, DecodePem, Encode, Sequence};
+use der::Reader as _;
+use der::{Any, Decode, DecodePem, Encode, Header, Sequence, SliceReader, Tag, TagNumber};
 use rsa::traits::PublicKeyParts as _;
 use serde_json::{json, Value};
 use sha2::Digest as _;
@@ -67,7 +68,7 @@ const OID_TST_INFO: &str = "1.2.840.113549.1.9.16.1.4";
 
 const SUBFILTER_RFC3161: &str = "ETSI.RFC3161";
 
-fn oid(s: &str) -> ObjectIdentifier {
+pub(crate) fn oid(s: &str) -> ObjectIdentifier {
     ObjectIdentifier::new_unwrap(s)
 }
 
@@ -315,7 +316,10 @@ fn verify_rsa_pss(
     // the params each DEFAULTed field falls back the same way. The CMS
     // `digestAlgorithm` only stands in when no params are present at all.
     let mut hash_oid = digest_alg.map(|a| a.oid);
-    let mut mgf = DigestKind::Sha1;
+    // `None` = params absent entirely → assume the common MGF1-same-hash
+    // convention; inside params an absent maskGenAlgorithm defaults to
+    // mgf1SHA1 per RFC 4055.
+    let mut mgf = None;
     let mut salt_length = 20usize;
     if let Some(params) = &sig_alg.parameters {
         let der = params
@@ -328,9 +332,10 @@ fn verify_rsa_pss(
                 .map(|a| a.oid)
                 .unwrap_or_else(|| oid(OID_SHA1)),
         );
-        if let Some(mgf_alg) = &pss.mask_gen_algorithm {
-            mgf = mgf1_hash(mgf_alg)?;
-        }
+        mgf = Some(match &pss.mask_gen_algorithm {
+            Some(mgf_alg) => mgf1_hash(mgf_alg)?,
+            None => DigestKind::Sha1,
+        });
         if let Some(tf) = &pss.trailer_field {
             if uint_value(tf) != Some(1) {
                 return Err("unsupported PSS trailerField".into());
@@ -348,7 +353,7 @@ fn verify_rsa_pss(
     };
     // `rsa::pss::Pss` only supports MGF1 keyed with the message hash, so a
     // differing MGF hash is rejected rather than approximated.
-    if mgf != digest {
+    if mgf.unwrap_or(digest) != digest {
         return Err("unsupported MGF1 hash for RSASSA-PSS".into());
     }
     let hashed = digest.hash(message);
@@ -699,30 +704,28 @@ fn build_cert_path(
 // ---------------------------------------------------------------------------
 
 #[derive(Sequence)]
-struct MessageImprint {
-    hash_algorithm: AlgorithmIdentifierOwned,
-    hashed_message: OctetString,
+pub(crate) struct MessageImprint {
+    pub(crate) hash_algorithm: AlgorithmIdentifierOwned,
+    pub(crate) hashed_message: OctetString,
 }
 
 #[derive(Sequence)]
-struct TstInfo {
+pub(crate) struct TstInfo {
     #[allow(dead_code)]
     version: der::asn1::Int,
     #[allow(dead_code)]
     policy: ObjectIdentifier,
-    message_imprint: MessageImprint,
+    pub(crate) message_imprint: MessageImprint,
     #[allow(dead_code)]
     serial_number: der::asn1::Int,
-    gen_time: CertTime,
+    pub(crate) gen_time: CertTime,
     #[allow(dead_code)]
     #[asn1(optional = "true")]
     accuracy: Option<Any>,
     #[allow(dead_code)]
     #[asn1(optional = "true")]
     ordering: Option<bool>,
-    #[allow(dead_code)]
-    #[asn1(optional = "true")]
-    nonce: Option<der::asn1::Int>,
+    pub(crate) nonce: Option<der::asn1::Int>,
     #[allow(dead_code)]
     #[asn1(context_specific = "0", tag_mode = "EXPLICIT", optional = "true")]
     tsa: Option<Any>,
@@ -731,7 +734,7 @@ struct TstInfo {
     extensions: Option<Any>,
 }
 
-fn signed_data_from_content_info(content_info: &ContentInfo) -> Option<SignedData> {
+pub(crate) fn signed_data_from_content_info(content_info: &ContentInfo) -> Option<SignedData> {
     if content_info.content_type != oid(OID_SIGNED_DATA) {
         return None;
     }
@@ -739,8 +742,77 @@ fn signed_data_from_content_info(content_info: &ContentInfo) -> Option<SignedDat
     SignedData::from_der(&der).ok()
 }
 
+fn skip_tlv<'r, R: der::Reader<'r>>(r: &mut R) -> der::Result<()> {
+    let h = r.decode::<Header>()?;
+    r.read_slice(h.length).map(|_| ())
+}
+
+/// The raw DER TLVs of every SignerInfo's `signedAttrs [0]` field, in
+/// signer order — the exact bytes the signature covers. Re-encoding the
+/// parsed attributes can reorder the SET or change tag/length forms, so
+/// they are recovered by walking the CMS DER instead.
+fn raw_signed_attrs_all(signed_der: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let Ok(mut top) = SliceReader::new(signed_der) else {
+        return out;
+    };
+    let Ok(outer) = top.decode::<Header>() else {
+        return out;
+    };
+    let _ = top.read_nested(outer.length, |sd| {
+        // version, digestAlgorithms, encapContentInfo
+        for _ in 0..3 {
+            skip_tlv(sd)?;
+        }
+        loop {
+            if sd.is_finished() {
+                return Ok(());
+            }
+            let h = sd.peek_header()?;
+            if h.tag.is_context_specific() {
+                // [0] certificates, [1] crls
+                skip_tlv(sd)?;
+                continue;
+            }
+            if h.tag != Tag::Set {
+                skip_tlv(sd)?;
+                continue;
+            }
+            // signerInfos SET OF SignerInfo
+            sd.read_nested(h.length, |set| {
+                while !set.is_finished() {
+                    let h = set.decode::<Header>()?;
+                    set.read_nested(h.length, |si| loop {
+                        if si.is_finished() {
+                            return Ok(());
+                        }
+                        let h = si.peek_header()?;
+                        if h.tag.is_context_specific()
+                            && h.tag.is_constructed()
+                            && h.tag.number() == TagNumber::new(0)
+                        {
+                            let start = usize::try_from(si.offset()).unwrap_or(usize::MAX);
+                            let hdr = si.decode::<Header>()?;
+                            si.read_slice(hdr.length)?;
+                            let end = usize::try_from(si.offset()).unwrap_or(usize::MAX);
+                            if start < end && end <= signed_der.len() {
+                                out.push(signed_der[start..end].to_vec());
+                            }
+                            return Ok(());
+                        }
+                        skip_tlv(si)?;
+                    })?;
+                }
+                Ok(())
+            })?;
+            return Ok(());
+        }
+    });
+    out
+}
+
 /// The TSTInfo carried as eContent of a document timestamp.
-fn tst_info_from_signed_data(data: &SignedData) -> Option<TstInfo> {
+pub(crate) fn tst_info_from_signed_data(data: &SignedData) -> Option<TstInfo> {
     if data.encap_content_info.econtent_type != oid(OID_TST_INFO) {
         return None;
     }
@@ -1151,6 +1223,11 @@ fn validate_one_signature(
         Some(sd) => sd,
         None => fail!("signature is not a CMS SignedData"),
     };
+    let signed_der = content_info.content.to_der().ok();
+    let raw_attrs = signed_der
+        .as_deref()
+        .map(raw_signed_attrs_all)
+        .unwrap_or_default();
 
     let mut pool: Vec<CertInfo> = Vec::new();
     if let Some(certs) = &signed_data.certificates {
@@ -1204,10 +1281,11 @@ fn validate_one_signature(
         }
     }
 
-    for signer_info in signed_data.signer_infos.0.iter() {
+    for (i, signer_info) in signed_data.signer_infos.0.iter().enumerate() {
         validate_signer(
             &mut result,
             signer_info,
+            raw_attrs.get(i).map(Vec::as_slice),
             &pool,
             &anchors,
             &content,
@@ -1225,6 +1303,7 @@ fn validate_one_signature(
 fn validate_signer(
     result: &mut Value,
     signer_info: &SignerInfo,
+    raw_attrs: Option<&[u8]>,
     pool: &[CertInfo],
     anchors: &[Anchor],
     content: &[u8],
@@ -1283,15 +1362,25 @@ fn validate_signer(
             return;
         }
         // RFC 5652 §5.4: the signature input is the DER encoding of the
-        // SignedAttrs SET OF — the [0] IMPLICIT tag on the wire is replaced
-        // by the universal SET tag, which is what `to_der` already emits.
-        match attrs.to_der() {
-            Ok(d) => d,
-            Err(_) => {
-                result["valid"] = json!(false);
-                result["errorMessage"] = json!("signed attributes encode failed");
-                populate_cert_fields(result, Some(signer_cert), sig, doc_ts, is_doc_timestamp);
-                return;
+        // SignedAttrs with the IMPLICIT [0] tag — the raw TLV recovered
+        // from the CMS, since re-encoding can reorder the SET. Fallback:
+        // re-encode and swap the universal SET tag for [0].
+        if let Some(raw) = raw_attrs {
+            raw.to_vec()
+        } else {
+            match attrs.to_der() {
+                Ok(mut d) => {
+                    if d.first() == Some(&0x31) {
+                        d[0] = 0xA0;
+                    }
+                    d
+                }
+                Err(_) => {
+                    result["valid"] = json!(false);
+                    result["errorMessage"] = json!("signed attributes encode failed");
+                    populate_cert_fields(result, Some(signer_cert), sig, doc_ts, is_doc_timestamp);
+                    return;
+                }
             }
         }
     } else {
@@ -1529,5 +1618,112 @@ mod tests {
             Some("1704110400000")
         );
         assert!(pdf_date_to_system_time("not a date").is_none());
+    }
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+
+    #[test]
+    fn debug_doc_timestamp_cms() {
+        let path = "../app/core/src/test/resources/timestamp/doc-timestamped.pdf";
+        let bytes = std::fs::read(path).unwrap();
+        let doc = pdfdoc::load("fixture.pdf", &bytes).unwrap();
+        let sigs = extract_signatures(&doc).unwrap();
+        let sig = &sigs[0];
+        eprintln!(
+            "subfilter={:?} br={:?} contents_len={}",
+            sig.sub_filter,
+            sig.byte_range,
+            sig.contents.len()
+        );
+        let mut cms_bytes = sig.contents.clone();
+        while cms_bytes.last() == Some(&0) {
+            cms_bytes.pop();
+        }
+        let ci = ContentInfo::from_der(&cms_bytes).unwrap();
+        eprintln!("content_type={}", ci.content_type);
+        let sd = signed_data_from_content_info(&ci).unwrap();
+        eprintln!(
+            "certs={} signers={} encap_type={} econtent={}",
+            sd.certificates.as_ref().map(|c| c.0.len()).unwrap_or(0),
+            sd.signer_infos.0.len(),
+            sd.encap_content_info.econtent_type,
+            sd.encap_content_info.econtent.is_some()
+        );
+        let signed_der = ci.content.to_der().unwrap();
+        let raws = raw_signed_attrs_all(&signed_der);
+        eprintln!(
+            "raw_attrs count={} lens={:?}",
+            raws.len(),
+            raws.iter().map(|r| r.len()).collect::<Vec<_>>()
+        );
+        for (i, si) in sd.signer_infos.0.iter().enumerate() {
+            eprintln!(
+                "sid={:?} digest={} sigalg={} siglen={} signed_attrs={} unsigned_attrs={}",
+                si.sid,
+                si.digest_alg.oid,
+                si.signature_algorithm.oid,
+                si.signature.as_bytes().len(),
+                si.signed_attrs.is_some(),
+                si.unsigned_attrs.is_some()
+            );
+            if let Some(attrs) = &si.signed_attrs {
+                for a in attrs.iter() {
+                    eprintln!("  attr {} values={}", a.oid, a.values.len());
+                }
+                let mut der = attrs.to_der().unwrap();
+                eprintln!(
+                    "  attrs_der len={} first={:02x?}",
+                    der.len(),
+                    &der[..4.min(der.len())]
+                );
+                if der.first() == Some(&0x31) {
+                    der[0] = 0xA0;
+                }
+                let certs = sd.certificates.as_ref().unwrap();
+                for choice in certs.0.iter() {
+                    if let CertificateChoices::Certificate(c) = choice {
+                        let cder = c.to_der().unwrap();
+                        if let Ok(info) = CertInfo::parse(&cder) {
+                            eprintln!(
+                                "  cert key_alg={} key={:?}",
+                                info.key_alg,
+                                info.key.as_ref().map(|k| match k {
+                                    PublicKey::Rsa(_) => "rsa",
+                                    PublicKey::P256(_) => "p256",
+                                    PublicKey::P384(_) => "p384",
+                                    PublicKey::Ed25519(_) => "ed25519",
+                                })
+                            );
+                            if let Some(key) = &info.key {
+                                let r = verify_signature(
+                                    key,
+                                    &si.signature_algorithm,
+                                    Some(&si.digest_alg),
+                                    &der,
+                                    si.signature.as_bytes(),
+                                );
+                                eprintln!("  verify(attrs) -> {r:?}");
+                                if let Some(raw) = raws.get(i) {
+                                    let rr = verify_signature(
+                                        key,
+                                        &si.signature_algorithm,
+                                        Some(&si.digest_alg),
+                                        raw,
+                                        si.signature.as_bytes(),
+                                    );
+                                    eprintln!(
+                                        "  verify(raw)  -> {rr:?} raw0={:02x?}",
+                                        &raw[..4.min(raw.len())]
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

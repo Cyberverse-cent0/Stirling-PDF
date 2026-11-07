@@ -200,8 +200,16 @@ pub fn router(state: AppState) -> Router {
             post(security::validate_compliance),
         )
         .route(
+            "/api/v1/security/accessibility-report",
+            post(security::accessibility_report),
+        )
+        .route(
             "/api/v1/security/validate-signature",
             post(crate::signature::validate_signature),
+        )
+        .route(
+            "/api/v1/security/timestamp-pdf",
+            post(crate::timestamp::timestamp_pdf),
         )
         .route("/api/v1/security/auto-redact", post(security::auto_redact))
         .route(
@@ -219,6 +227,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/security/remove-password",
             post(passwords::remove_password),
+        )
+        .route(
+            "/api/v1/security/restore-pdf-protection",
+            post(passwords::restore_pdf_protection),
         )
         .route(
             "/api/v1/security/prepare-pdf-session",

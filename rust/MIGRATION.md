@@ -84,6 +84,20 @@ rest. The frontend keeps calling `/api/*`; routing decides who answers.
 - The PDFium toolchain is fully removed: no `pdfium-render` dependency,
   no `libpdfium` binary, no C headers, no standalone bindings crate.
   All PDF work runs on `lopdf` via `src/pdfdoc.rs`.
+- Rasterisation: `hayro` 0.9.0 (pure Rust, Apache-2.0/MIT,
+  `forbid(unsafe)`, CPU-only via `vello_cpu`) is integrated as the
+  primary page renderer in `BlankRasterizer` (`handlers/misc.rs`) —
+  covers remove-blanks, extract-image-scans, scanner-effect,
+  auto-split-pdf QR detection and the ocr-pdf raster fallback. It
+  renders at ~70 ms/page at 150 DPI with mean pixel diff ≈ 0.1–3/255
+  vs Ghostscript on the test corpus. `RenderCache` is `Rc`-based so a
+  fresh one is built per page (parallel callers stay `Sync`-safe);
+  a hayro parse/render panic marks the document hayro-broken and every
+  later page falls back to Ghostscript `png16m`, which also covers
+  password-protected files hayro cannot open. Direct `gs` call sites
+  outside `BlankRasterizer` (redact-execute, pdf→img/cbz) still require
+  gs. Ghostscript remains required for `pdfwrite`/`pdfa` device output
+  (compress-pdf, pdfa endpoint) regardless.
 - Docker assets archived under `runtime/` (see `runtime/README.md`).
 
 ## Target architecture

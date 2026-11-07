@@ -2720,11 +2720,17 @@ fn remove_blanks(
     crate::handlers::split::zip_response(entries, &format!("{base}_processed.zip"))
 }
 
-/// Ghostscript page rasteriser shared by `remove-blanks` and
-/// `auto-split-pdf`'s QR divider detection. `probe` writes the PDF once
-/// and verifies the binary; each page renders through `png16m`.
+/// PDF page rasteriser shared by `remove-blanks` and
+/// `auto-split-pdf`'s QR divider detection. Prefers the pure-Rust `hayro`
+/// renderer; Ghostscript `png16m` remains as the fallback for documents
+/// hayro cannot parse (e.g. password-protected files). `probe` writes
+/// the PDF once and succeeds when either backend is usable; each page
+/// renders in memory.
 pub(crate) struct BlankRasterizer {
-    program: std::path::PathBuf,
+    /// Resolved `gs` binary, `None` when absent — hayro may still serve.
+    program: Option<std::path::PathBuf>,
+    hayro: Option<hayro::hayro_syntax::Pdf>,
+    hayro_broken: std::sync::atomic::AtomicBool,
     input: std::path::PathBuf,
     dir: tempfile::TempDir,
 }
@@ -2732,29 +2738,83 @@ pub(crate) struct BlankRasterizer {
 impl BlankRasterizer {
     pub(crate) fn probe(name: &str, bytes: &[u8]) -> Option<Self> {
         let program = crate::convert::resolve(&crate::settings::engine_program("gs"));
-        let ok = std::process::Command::new(&program)
+        let gs_ok = std::process::Command::new(&program)
             .arg("--version")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
             .is_ok_and(|s| s.success());
-        if !ok {
+        let hayro = hayro::hayro_syntax::Pdf::new(bytes.to_vec()).ok();
+        if !gs_ok && hayro.is_none() {
             return None;
         }
         let dir = tempfile::tempdir().ok()?;
         let input = dir.path().join(format!("{name}.pdf"));
         std::fs::write(&input, bytes).ok()?;
         Some(Self {
-            program,
+            program: gs_ok.then_some(program),
+            hayro,
+            hayro_broken: std::sync::atomic::AtomicBool::new(false),
             input,
             dir,
         })
     }
 
-    /// One rendered page as an RGB image, or `None` when gs fails.
+    /// One rendered page as an RGB image, or `None` when no backend can
+    /// render it.
     pub(crate) fn render(&self, page: u32, dpi: u32) -> Option<image::DynamicImage> {
+        if let Some(img) = self.render_hayro(page, dpi) {
+            return Some(img);
+        }
+        self.render_gs(page, dpi)
+    }
+
+    fn render_hayro(&self, page: u32, dpi: u32) -> Option<image::DynamicImage> {
+        let pdf = self.hayro.as_ref()?;
+        if self.hayro_broken.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        let index = usize::try_from(page.checked_sub(1)?).ok()?;
+        let page_ref = pdf.pages().get(index)?;
+        let scale = (f64::from(dpi) / 72.0) as f32;
+        let settings = hayro::hayro_interpret::InterpreterSettings::default();
+        let render_settings = hayro::RenderSettings::default();
+        let pixmap_settings = hayro::PixmapSettings {
+            x_scale: scale,
+            y_scale: scale,
+            bg_color: hayro::vello_cpu::color::palette::css::WHITE,
+        };
+        // hayro's render API is infallible but can panic on malformed
+        // content; treat a panic as "hayro can't do this document" and
+        // hand every later page to Ghostscript. `RenderCache` is `Rc`-based
+        // (!Sync), so callers rendering pages in parallel each build their
+        // own — font/glyph caching is per page rather than per document.
+        let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let cache = hayro::RenderCache::new();
+            Some(hayro::render(
+                page_ref,
+                &cache,
+                &settings,
+                &render_settings,
+                &pixmap_settings,
+            ))
+        }));
+        let pixmap = match rendered {
+            Ok(Some(pm)) => pm,
+            _ => {
+                self.hayro_broken
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                return None;
+            }
+        };
+        let png = pixmap.into_png().ok()?;
+        image::load_from_memory(&png).ok()
+    }
+
+    fn render_gs(&self, page: u32, dpi: u32) -> Option<image::DynamicImage> {
+        let program = self.program.as_ref()?;
         let out = self.dir.path().join(format!("page-{page}-{dpi}.png"));
-        let status = std::process::Command::new(&self.program)
+        let status = std::process::Command::new(program)
             .args([
                 "-dNOPAUSE",
                 "-dBATCH",

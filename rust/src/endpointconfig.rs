@@ -368,13 +368,10 @@ fn group_table() -> &'static [(&'static str, &'static [&'static str])] {
 /// Several are frontend-composed tools that decompose into routed calls —
 /// disabling the key would hide a working tool.
 const UNSUPPORTED_ENDPOINTS: &[&str] = &[
-    // CMS/PKCS#7 signing, RFC 3161 timestamps — needs a crypto stack Rust
-    // does not have.
+    // CMS/PKCS#7 signing — needs a crypto stack Rust does not have.
     "cert-sign",
-    "timestamp-pdf",
     // Proprietary modules with no Rust port.
     "ingest",
-    "restore-pdf-protection",
     // Proprietary/AI/integration surface queried by path-derived keys.
     "orchestrate",
     "tools",
@@ -465,9 +462,10 @@ impl EndpointConfig {
 
         // Built-in dependency rules from `processEnvironmentConfigs`.
         // Rust never ships the proprietary PDF/UA tagger or the form-detection
-        // model manager.
+        // model manager. `accessibility-report` is served natively by
+        // `pdfua` (veraPDF + lopdf); its figure enumeration is the part
+        // still missing, not the endpoint.
         config.disable_endpoint("pdf-to-ua", DisableReason::Dependency);
-        config.disable_endpoint("accessibility-report", DisableReason::Dependency);
         config.disable_endpoint("form-detection", DisableReason::Dependency);
         for endpoint in UNSUPPORTED_ENDPOINTS {
             config.disable_endpoint(endpoint, DisableReason::NotSupported);
@@ -514,6 +512,10 @@ impl EndpointConfig {
             match outcome {
                 ProbeOutcome::Missing => {
                     tracing::warn!("Missing dependency: {cmd} - Disabling group: {group}");
+                    self.disable_group(group, DisableReason::Dependency);
+                }
+                ProbeOutcome::Broken => {
+                    tracing::warn!("Cannot execute dependency: {cmd} - Disabling group: {group}");
                     self.disable_group(group, DisableReason::Dependency);
                 }
                 ProbeOutcome::Available => {}
@@ -687,6 +689,11 @@ impl EndpointConfig {
 
 enum ProbeOutcome {
     Missing,
+    /// Found on disk but cannot be executed at all — wrong-arch binary
+    /// (e.g. arm64 engine inside an x86_64 universal bundle), missing
+    /// shared library, or spawn failure. Every call would fail, so the
+    /// group disables like a missing dependency.
+    Broken,
     /// `--version` ran and yielded a version string.
     Version(String),
     /// Available, but no version could be parsed — Java logs a warning and
@@ -713,13 +720,17 @@ fn probe_engine(cmd: &str) -> ProbeOutcome {
     if !engine_available(cmd) {
         return ProbeOutcome::Missing;
     }
-    let out = crate::convert::run(
+    // `run` errs only when the binary can't be spawned (wrong arch, missing
+    // dylib) — `engine_available` already proved a `--version` fallback works
+    // for engines that merely reject the flag, so a spawn failure here means
+    // the engine is unusable rather than version-less.
+    let out = match crate::convert::run(
         &crate::convert::EngineSpec::new(cmd)
             .arg("--version")
             .timeout(PROBE_TIMEOUT),
-    );
-    let Ok(out) = out else {
-        return ProbeOutcome::Available;
+    ) {
+        Ok(out) => out,
+        Err(_) => return ProbeOutcome::Broken,
     };
     if out.timed_out || out.code != Some(0) {
         return ProbeOutcome::Available;
@@ -984,16 +995,17 @@ mod tests {
     #[test]
     fn unrouted_endpoints_report_not_supported() {
         init(&Settings::default());
-        for key in [
-            "cert-sign",
-            "timestamp-pdf",
-            "ingest",
-            "restore-pdf-protection",
-        ] {
+        for key in ["cert-sign", "ingest"] {
             let (enabled, reason) = endpoint_availability(key);
             assert!(!enabled, "{key} should be disabled");
             assert_eq!(reason, Some(DisableReason::NotSupported), "{key}");
         }
+        // `timestamp-pdf` is routed natively (`crate::timestamp`).
+        assert!(is_endpoint_enabled("/api/v1/security/timestamp-pdf"));
+        // `restore-pdf-protection` is routed natively (`passwords`).
+        assert!(is_endpoint_enabled(
+            "/api/v1/security/restore-pdf-protection"
+        ));
         // Path spellings resolve to the same key.
         let (enabled, reason) = endpoint_availability("/api/v1/security/cert-sign");
         assert!(!enabled);

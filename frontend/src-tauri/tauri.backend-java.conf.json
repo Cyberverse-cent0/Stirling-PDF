@@ -1,6 +1,0 @@
-{
-  "bundle": {
-    "externalBin": [],
-    "resources": ["libs/*.jar", "runtime/jre/**/*"]
-  }
-}

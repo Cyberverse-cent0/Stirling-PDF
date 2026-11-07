@@ -5,11 +5,13 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
 
-/// FastAPI-style error body: every error response is `{"detail": ...}`.
+/// FastAPI-style error body: handled errors are `{"detail": ...}`; unhandled
+/// exceptions render Starlette's plain-text `Internal Server Error` instead.
 #[derive(Debug)]
 pub struct ApiError {
     pub status: StatusCode,
     pub detail: String,
+    plain: bool,
 }
 
 impl ApiError {
@@ -17,6 +19,15 @@ impl ApiError {
         Self {
             status,
             detail: detail.into(),
+            plain: false,
+        }
+    }
+
+    fn plain(status: StatusCode, detail: &'static str) -> Self {
+        Self {
+            status,
+            detail: detail.to_string(),
+            plain: true,
         }
     }
 
@@ -60,6 +71,9 @@ struct ErrorBody<'a> {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if self.plain {
+            return (self.status, self.detail).into_response();
+        }
         (
             self.status,
             Json(ErrorBody {
@@ -73,7 +87,7 @@ impl IntoResponse for ApiError {
 impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {
         tracing::error!(error = %err, "unhandled engine error");
-        Self::internal("internal error")
+        Self::plain(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
     }
 }
 

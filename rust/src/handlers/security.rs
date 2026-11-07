@@ -3237,6 +3237,31 @@ fn validate_compliance(
     ))
 }
 
+/// `POST /api/v1/security/accessibility-report` —
+/// `AccessibilityReportController.report`: a read-only PDF/UA audit. The
+/// response never modifies the document; `figuresNeedingDescription` is
+/// empty until the tagged-content/layout analysis port lands (see
+/// `pdfua` module docs).
+#[stirling_macros::endpoint]
+fn accessibility_report(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    params: Vec<(String, String)>,
+) -> AppResult<Json<Value>> {
+    let Some(upload) = uploads.into_iter().next() else {
+        return Err(AppError::BadRequest(format!("{FILE_FIELD} is required")));
+    };
+    if upload.bytes.is_empty() {
+        return Err(AppError::BadRequest(format!("{FILE_FIELD} is empty")));
+    }
+    let profile = crate::pdfua::UaProfile::from_request(Some(param(&params, "profile", "")));
+    let report = crate::pdfua::audit(&upload.bytes, profile)?;
+    Ok(Json(serde_json::to_value(report).map_err(|e| {
+        AppError::Internal(anyhow::anyhow!("accessibility report serialisation: {e}"))
+    })?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

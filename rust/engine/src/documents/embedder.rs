@@ -198,9 +198,9 @@ impl EmbeddingService {
         texts: &[String],
         input_type: EmbedInputType,
     ) -> anyhow::Result<Vec<Vec<f32>>> {
-        if self.config.provider == EmbeddingProvider::Voyage
-            && self.config.api_key.as_deref() == Some(MISSING_API_KEY)
-        {
+        // Python's voyage.py raises before any HTTP call when the key is
+        // absent — cover both the env path (None) and the pushed sentinel.
+        if self.config.provider == EmbeddingProvider::Voyage && !self.configured() {
             anyhow::bail!(
                 "VoyageAI embeddings need an API key: set {VOYAGE_API_KEY_ENV} or push one via admin AI settings."
             );

@@ -64,6 +64,13 @@ fn anyhow_errors_become_500_internal() {
     let err = ApiError::from(anyhow::anyhow!("db exploded"));
     assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
     // The internal detail is deliberately generic — the real error is
-    // only logged, matching FastAPI's unhandled-exception behaviour.
-    assert_eq!(err.detail, "internal error");
+    // only logged. Starlette's unhandled-exception middleware answers
+    // plain-text "Internal Server Error", not a JSON detail body.
+    assert_eq!(err.detail, "Internal Server Error");
+    let response = err.into_response();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "text/plain; charset=utf-8"
+    );
 }
