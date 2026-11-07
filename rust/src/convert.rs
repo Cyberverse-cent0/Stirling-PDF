@@ -145,6 +145,17 @@ pub fn find_executable(program: &str, path_dirs: &[PathBuf]) -> Option<PathBuf> 
     None
 }
 
+/// `lib/` inside the first bundled engine dir that has one. Staged
+/// payloads carry their shared-library closure there (see the desktop
+/// `stage-engines` stager); `main` exports it as `LD_LIBRARY_PATH` so
+/// engine children resolve bundled libs without system installs.
+pub fn engines_lib_dir() -> Option<PathBuf> {
+    bundled_engine_dirs()
+        .iter()
+        .map(|dir| dir.join("lib"))
+        .find(|dir| dir.is_dir())
+}
+
 /// Program for `Command::new` call sites that bypass `EngineSpec`:
 /// resolves bundled dirs and `PATH`, but passes through qualified paths
 /// (`customPaths.operations` entries) and unresolved names unchanged —
@@ -328,6 +339,20 @@ mod tests {
         #[cfg(windows)]
         assert!(found.is_none() || found.is_some()); // no extension on Windows
         assert!(find_executable("definitely-not-an-engine-xyz", &[]).is_none());
+    }
+
+    #[test]
+    fn resolve_passes_through_qualified_and_missing_names() {
+        // customPaths entries and relative paths are already qualified —
+        // they must reach Command::new untouched.
+        assert_eq!(resolve("/opt/engines/gs"), PathBuf::from("/opt/engines/gs"));
+        assert_eq!(resolve("bin/gs"), PathBuf::from("bin/gs"));
+        // An unresolvable bare name stays a bare name so exec reports
+        // the usual NotFound instead of a fabricated path.
+        assert_eq!(
+            resolve("definitely-not-an-engine-xyz"),
+            PathBuf::from("definitely-not-an-engine-xyz")
+        );
     }
 }
 

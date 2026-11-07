@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 
-use crate::agents::chunked_mapper::{ChunkedMapper, ChunkOutput, ChunkedMapperError};
+use crate::agents::chunked_mapper::{ChunkOutput, ChunkedMapper, ChunkedMapperError};
 use crate::agents::contradiction::ledger::ClaimLedger;
 use crate::agents::contradiction::prompts;
 use crate::agents::runtime::AgentError;
@@ -30,8 +30,7 @@ use crate::agents::structured::{AgentOutput, StructuredAgent};
 use crate::config::AppSettings;
 use crate::contracts::common::AiFile;
 use crate::contracts::contradiction::{
-    AnchorQuality, Claim, ClaimPolarity, Contradiction, ContradictionReport,
-    ContradictionSeverity,
+    AnchorQuality, Claim, ClaimPolarity, Contradiction, ContradictionReport, ContradictionSeverity,
 };
 use crate::contracts::documents::Page;
 use crate::documents::service::DocumentService;
@@ -130,17 +129,18 @@ impl ContradictionDetector {
         chat_provider: &str,
         documents: Arc<DocumentService>,
     ) -> Result<Self, ChunkedMapperError> {
-        let json_agent = |system: String, schema: Value| StructuredAgent::new(
-            fast_model.clone(),
-            system,
-            AgentOutput::Json { schema },
-            chat_provider,
-        );
+        let json_agent = |system: String, schema: Value| {
+            StructuredAgent::new(
+                fast_model.clone(),
+                system,
+                AgentOutput::Json { schema },
+                chat_provider,
+            )
+        };
         let mapper = ChunkedMapper::new(
             json_agent(
                 prompts::claim_extractor_prompt(),
-                serde_json::to_value(schemars::schema_for!(ExtractedClaims))
-                    .unwrap_or(Value::Null),
+                serde_json::to_value(schemars::schema_for!(ExtractedClaims)).unwrap_or(Value::Null),
             ),
             settings.chunked_reasoner_chars_per_slice,
             settings.chunked_reasoner_concurrency,
@@ -151,13 +151,10 @@ impl ContradictionDetector {
             None,
         )?;
         Ok(Self {
-            detect_semaphore: Arc::new(Semaphore::new(
-                settings.contradiction_detect_concurrency,
-            )),
+            detect_semaphore: Arc::new(Semaphore::new(settings.contradiction_detect_concurrency)),
             subject_canonicaliser: json_agent(
                 prompts::subject_canonicaliser_prompt(),
-                serde_json::to_value(schemars::schema_for!(SubjectMapping))
-                    .unwrap_or(Value::Null),
+                serde_json::to_value(schemars::schema_for!(SubjectMapping)).unwrap_or(Value::Null),
             ),
             pair_detector: json_agent(
                 prompts::contradiction_detector_prompt(),
@@ -351,10 +348,7 @@ impl ContradictionDetector {
 
     // -- Stage 2: canonicalisation -------------------------------------
 
-    async fn canonicalise_subjects(
-        &self,
-        subjects: &[String],
-    ) -> HashMap<String, String> {
+    async fn canonicalise_subjects(&self, subjects: &[String]) -> HashMap<String, String> {
         if subjects.is_empty() {
             return HashMap::new();
         }
@@ -397,12 +391,14 @@ impl ContradictionDetector {
             .acquire_owned()
             .await
             .expect("semaphore closed");
-        let timeout = Duration::from_secs_f64(
-            self.settings.chunked_reasoner_worker_timeout_seconds,
-        );
-        let result = tokio::time::timeout(timeout, self.subject_canonicaliser.run::<SubjectMapping>(&prompt))
-            .await
-            .map_err(|_| AgentError::Output("subject canonicalisation timed out".to_string()))??;
+        let timeout =
+            Duration::from_secs_f64(self.settings.chunked_reasoner_worker_timeout_seconds);
+        let result = tokio::time::timeout(
+            timeout,
+            self.subject_canonicaliser.run::<SubjectMapping>(&prompt),
+        )
+        .await
+        .map_err(|_| AgentError::Output("subject canonicalisation timed out".to_string()))??;
 
         let mut batch_mapping = HashMap::new();
         for alias in result.aliases {
@@ -541,12 +537,14 @@ impl ContradictionDetector {
             "Canonical subject: {}\n<claims>\n{claims_block}\n</claims>",
             python_repr(canonical_subject)
         );
-        let timeout = Duration::from_secs_f64(
-            self.settings.chunked_reasoner_worker_timeout_seconds,
-        );
-        let result = tokio::time::timeout(timeout, self.pair_detector.run::<BucketContradictions>(&prompt))
-            .await
-            .map_err(|_| AgentError::Output("pair detection timed out".to_string()))??;
+        let timeout =
+            Duration::from_secs_f64(self.settings.chunked_reasoner_worker_timeout_seconds);
+        let result = tokio::time::timeout(
+            timeout,
+            self.pair_detector.run::<BucketContradictions>(&prompt),
+        )
+        .await
+        .map_err(|_| AgentError::Output("pair detection timed out".to_string()))??;
         Ok(result.pairs)
     }
 
@@ -566,9 +564,8 @@ impl ContradictionDetector {
             "warnings": warning_count,
         });
         let prompt = format!("<verdict>{}</verdict>", escape_for_tag(&stats.to_string()));
-        let timeout = Duration::from_secs_f64(
-            self.settings.chunked_reasoner_worker_timeout_seconds,
-        );
+        let timeout =
+            Duration::from_secs_f64(self.settings.chunked_reasoner_worker_timeout_seconds);
         tokio::time::timeout(timeout, self.summary_agent.run_text(&prompt))
             .await
             .map_err(|_| AgentError::Output("summary generation timed out".to_string()))?

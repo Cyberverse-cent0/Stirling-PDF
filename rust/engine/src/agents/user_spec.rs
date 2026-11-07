@@ -90,9 +90,9 @@ impl UserSpecAgent {
             resume_with: None,
         };
         let draft = self.run_draft_agent(request, &edit_plan).await?;
-        Ok(AgentDraftWorkflowResponse::Draft(AgentDraftResponsePayload {
-            draft,
-        }))
+        Ok(AgentDraftWorkflowResponse::Draft(
+            AgentDraftResponsePayload { draft },
+        ))
     }
 
     pub async fn revise(
@@ -128,7 +128,10 @@ impl UserSpecAgent {
         request: &AgentDraftRequest,
         edit_plan: &EditPlanPayload,
     ) -> Result<AgentDraft, crate::agents::runtime::AgentError> {
-        let metadata: UserSpecMetadata = self.agent.run(&build_draft_prompt(request, edit_plan)).await?;
+        let metadata: UserSpecMetadata = self
+            .agent
+            .run(&build_draft_prompt(request, edit_plan))
+            .await?;
         Ok(AgentDraft {
             name: metadata.name,
             description: metadata.description,
@@ -147,10 +150,10 @@ impl UserSpecAgent {
         request: &AgentRevisionRequest,
         edit_plan: &EditPlanPayload,
     ) -> Result<AgentDraft, crate::agents::runtime::AgentError> {
-        let metadata: UserSpecMetadata =
-            self.agent
-                .run(&build_revision_prompt(request, edit_plan))
-                .await?;
+        let metadata: UserSpecMetadata = self
+            .agent
+            .run(&build_revision_prompt(request, edit_plan))
+            .await?;
         // `ai_tool` steps are preserved verbatim — they are not re-plannable.
         let mut steps: Vec<AgentSpecStep> = edit_plan
             .steps
@@ -231,4 +234,3 @@ fn build_revision_prompt(request: &AgentRevisionRequest, edit_plan: &EditPlanPay
         language_directive(),
     )
 }
-

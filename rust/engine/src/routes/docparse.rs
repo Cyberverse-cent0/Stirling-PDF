@@ -23,7 +23,7 @@ pub fn router() -> Router<AppState> {
 
 async fn capabilities(State(state): State<AppState>) -> Json<DocparseCapabilities> {
     Json(DocparseCapabilities {
-        indexing_configured: state.documents.embedder().await.configured(),
+        indexing_configured: state.runtime.load().documents.embedder().await.configured(),
     })
 }
 
@@ -53,7 +53,7 @@ async fn ingest(
     RequiredUserId(user_id): RequiredUserId,
     Json(request): Json<IngestRequest>,
 ) -> ApiResult<Json<IngestResponse>> {
-    let settings = &state.settings;
+    let settings = state.runtime.load().settings.clone();
     let chunk_size = request.chunk_size.unwrap_or(settings.rag_chunk_size);
     let overlap = request.overlap.unwrap_or(settings.rag_chunk_overlap);
 
@@ -94,7 +94,10 @@ async fn ingest(
             .collect();
         let pages: Vec<PageText> = page_texts(&request.blocks);
         chunks_indexed = state
+            .runtime
+            .load()
             .documents
+            .clone()
             .ingest_prepared(
                 &request.document_id,
                 &prepared,

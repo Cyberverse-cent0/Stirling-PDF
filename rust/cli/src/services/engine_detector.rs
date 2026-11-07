@@ -37,7 +37,7 @@ impl EngineKind {
     }
 
     /// Executables probed on PATH, in order.
-    fn candidates(self) -> &'static [&'static str] {
+    pub(crate) fn candidates(self) -> &'static [&'static str] {
         match self {
             Self::Ghostscript => &["gs", "gswin64c", "gswin32c"],
             Self::Qpdf => &["qpdf"],

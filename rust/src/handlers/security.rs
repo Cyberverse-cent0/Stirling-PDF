@@ -20,7 +20,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use axum::extract::{Multipart, Query, State};
 use axum::response::Response;
 use axum::Json;
 use lopdf::{decode_text_string, Dictionary, Document, Object, ObjectId, Stream};
@@ -35,9 +34,7 @@ use crate::handlers::misc;
 use crate::page_select;
 use crate::pdfdoc;
 use crate::pdftext;
-use crate::upload::{
-    output_name, param, param_bool, param_f64, receive_multipart, Upload, FILE_FIELD,
-};
+use crate::upload::{output_name, param, param_bool, param_f64, Upload, FILE_FIELD};
 
 const MAX_STRUCT_DEPTH: usize = 64;
 
@@ -1838,13 +1835,14 @@ fn remove_page_fonts(doc: &mut Document) {
 /// `/auto-redact` and `/redact-execute` are handled below: they share the
 /// same overlay approach since jpdfium's verified content removal has no
 /// lopdf equivalent.
-pub async fn redact(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint]
+fn redact(
+    state: AppState,
+    query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
-    misc::dispatch(state, query, uploads, params, redact_work).await
+    redact_impl(state, query, uploads, params)
 }
 
 #[derive(Deserialize)]
@@ -1857,7 +1855,7 @@ struct RedactionArea {
     color: Option<String>,
 }
 
-fn redact_work(
+fn redact_impl(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
@@ -1999,18 +1997,19 @@ const MATCHES_HEADER: &str = "x-stirling-redaction-matches";
 /// rasterises pages through Ghostscript like `/redact`; regexes the
 /// `regex` crate cannot compile (Java lookaround/backreferences/possessive
 /// quantifiers) are rejected.
-pub async fn auto_redact(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint]
+fn auto_redact(
+    state: AppState,
+    query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
     if auto_redact_regex_unsupported(&params) {
         return Err(AppError::BadRequest(
             "useRegex terms use syntax the native matcher cannot compile".into(),
         ));
     }
-    misc::dispatch(state, query, uploads, params, auto_redact_work).await
+    auto_redact_impl(state, query, uploads, params)
 }
 
 /// True when `useRegex` terms fail the `regex` crate — valid Java syntax the
@@ -2029,7 +2028,7 @@ fn auto_redact_regex_unsupported(params: &[(String, String)]) -> bool {
     .is_err()
 }
 
-fn auto_redact_work(
+fn auto_redact_impl(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
@@ -2588,28 +2587,20 @@ fn int_list_param(params: &[(String, String)], name: &str) -> AppResult<Vec<Opti
 /// succeeded, which never happens here. Whole-page wipes still remove page
 /// content natively (contents stream dropped). `style.convert_to_image` and
 /// `IMAGE_FINALIZE` rasterise every output page through Ghostscript.
-pub async fn redact_execute(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint]
+fn redact_execute(
+    state: AppState,
+    query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
     let request = parse_execute_request(&params)?;
     if regex_patterns_unsupported(&request.regex_patterns) {
         return Err(AppError::BadRequest(
             "regexPatterns use syntax the native matcher cannot compile".into(),
         ));
     }
-    misc::dispatch(
-        state,
-        query,
-        uploads,
-        params,
-        move |state, query, uploads, params| {
-            redact_execute_work(state, query, uploads, params, request)
-        },
-    )
-    .await
+    redact_execute_impl(state, query, uploads, params, request)
 }
 
 /// True when any `regexPatterns` entry fails the `regex` crate — valid Java
@@ -2620,7 +2611,7 @@ fn regex_patterns_unsupported(patterns: &[String]) -> bool {
     patterns.iter().any(|p| Regex::new(p).is_err())
 }
 
-fn redact_execute_work(
+fn redact_execute_impl(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
@@ -2916,6 +2907,335 @@ fn apply_detected_images(
     }
     ops.push_str("f Q\n");
     misc::append_page_content(document, page_ids[index], &ops)
+}
+
+// ---------------------------------------------------------------------------
+// veraPDF-backed compliance endpoints
+// ---------------------------------------------------------------------------
+
+use crate::verapdf::{self, DetectedFlavour, Family};
+
+/// The `PDFVerificationResult` JSON shape, shared by `verify-pdf` and the
+/// internal compliance check.
+fn verification_result_json(
+    declared_for_result: Option<&DetectedFlavour>,
+    validation: &DetectedFlavour,
+    compliant: bool,
+    issues: Vec<verapdf::Issue>,
+    error_message: Option<String>,
+) -> Value {
+    let total_failures = issues.len() + usize::from(error_message.is_some());
+    let mut all_issues = issues;
+    if let Some(msg) = error_message {
+        all_issues.push(verapdf::Issue {
+            rule_id: None,
+            message: msg,
+            location: "Unknown".into(),
+            specification: None,
+            clause: None,
+            test_number: None,
+        });
+    }
+    let declared_pdfa = declared_for_result
+        .map(|d| d.declared_pdfa)
+        .unwrap_or(false);
+    let (standard, standard_name) = match declared_for_result {
+        Some(d) => (d.standard_id.clone(), d.standard_name.clone()),
+        None => (verapdf::NOT_PDFA_ID.into(), verapdf::NOT_PDFA_NAME.into()),
+    };
+    let display = verapdf::standard_display(&standard_name, total_failures, declared_pdfa);
+    json!({
+        "standard": standard,
+        "standardName": display,
+        "validationProfile": validation.standard_id,
+        "validationProfileName": validation.standard_name,
+        "complianceSummary": display,
+        "declaredPdfa": declared_pdfa,
+        "compliant": compliant,
+        "totalFailures": total_failures,
+        "totalWarnings": 0,
+        "failures": all_issues,
+        "warnings": [],
+    })
+}
+
+/// `VeraPDFService.validatePDF`'s flavour selection: PDF/A flavours are
+/// only validated when the XMP identification is intact; PDF/UA and WTPDF
+/// declarations are always checked.
+fn flavours_to_validate(detection: &verapdf::Detection) -> Vec<&DetectedFlavour> {
+    detection
+        .flavours
+        .iter()
+        .filter(|f| f.family != Family::PdfA || detection.has_pdfa_metadata)
+        .collect()
+}
+
+/// One `PDFVerificationResult` for `flavour`, or the error-result shape
+/// `buildErrorResult` produces when validation itself fails.
+fn validate_one(
+    bytes: &[u8],
+    declared_pdfa_flavour: Option<&DetectedFlavour>,
+    flavour: &DetectedFlavour,
+) -> Value {
+    let declared_for_result = if flavour.family == Family::PdfA {
+        declared_pdfa_flavour
+    } else {
+        Some(flavour)
+    };
+    if flavour.flavour.is_none() {
+        // WTPDF: the CLI has no flavour for it — Java's library validates
+        // it, so report the gap as a failed result rather than silently
+        // passing.
+        return verification_result_json(
+            declared_for_result,
+            flavour,
+            false,
+            Vec::new(),
+            Some(format!(
+                "Validation error: {} is not supported by the veraPDF CLI",
+                flavour.standard_name
+            )),
+        );
+    }
+    let report = verapdf::validate(bytes, flavour.flavour.as_deref());
+    if report.unavailable {
+        return verification_result_json(
+            declared_for_result,
+            flavour,
+            false,
+            Vec::new(),
+            Some("Validation error: veraPDF CLI (`verapdf`) is not installed".into()),
+        );
+    }
+    if let Some(err) = report.error {
+        return verification_result_json(
+            declared_for_result,
+            flavour,
+            false,
+            Vec::new(),
+            Some(format!("Validation error: {err}")),
+        );
+    }
+    verification_result_json(
+        declared_for_result,
+        flavour,
+        report.compliant,
+        report.issues,
+        None,
+    )
+}
+
+/// `VeraPDFService.validatePDF`: the full `List<PDFVerificationResult>`
+/// for one document — the not-PDF/A sentinel plus one result per declared
+/// flavour that has a CLI-applicable validation.
+fn verification_results(bytes: &[u8]) -> Vec<Value> {
+    let detection = verapdf::detect(bytes);
+    let mut results: Vec<Value> = Vec::new();
+    let pdfa_declared = detection
+        .flavours
+        .iter()
+        .any(|f| f.family == Family::PdfA && detection.has_pdfa_metadata);
+    if !pdfa_declared {
+        // `createNoPdfaDeclarationResult`.
+        results.push(json!({
+            "standard": verapdf::NOT_PDFA_ID,
+            "standardName": verapdf::NOT_PDFA_NAME,
+            "validationProfile": verapdf::NOT_PDFA_ID,
+            "validationProfileName": verapdf::NOT_PDFA_NAME,
+            "complianceSummary": verapdf::NOT_PDFA_NAME,
+            "declaredPdfa": false,
+            "compliant": false,
+            "totalFailures": 1,
+            "totalWarnings": 0,
+            "failures": [{
+                "message": "Document does not declare PDF/A compliance in its XMP metadata.",
+                "location": "Unknown",
+                "specification": "XMP pdfaid",
+            }],
+            "warnings": [],
+        }));
+    }
+    let declared_pdfa_flavour = detection
+        .flavours
+        .iter()
+        .find(|f| f.family == Family::PdfA)
+        .cloned();
+    for flavour in flavours_to_validate(&detection) {
+        let declared_ref = declared_pdfa_flavour.as_ref();
+        results.push(validate_one(bytes, declared_ref, flavour));
+    }
+    results
+}
+
+/// `POST /api/v1/security/verify-pdf` — `VerifyPDFController.verifyPDF`:
+/// auto-detect declared standards from XMP, validate each through the
+/// veraPDF CLI, return `List<PDFVerificationResult>` as JSON.
+#[stirling_macros::endpoint]
+fn verify_pdf(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    _params: Vec<(String, String)>,
+) -> AppResult<Json<Value>> {
+    let Some(upload) = uploads.into_iter().next() else {
+        return Err(AppError::BadRequest(format!("{FILE_FIELD} is required")));
+    };
+    pdfdoc::load(&upload.name, &upload.bytes)?;
+    Ok(Json(Value::Array(verification_results(&upload.bytes))))
+}
+
+fn result_contains_ci(result: &Value, key: &str, needle: &str) -> bool {
+    result[key]
+        .as_str()
+        .is_some_and(|v| v.to_lowercase().contains(needle))
+}
+
+/// `ValidateComplianceController.isPdfUa` — names carry the display form
+/// ("PDF/UA-1"), ids the CLI flavour ("ua-1"); check both.
+fn is_pdf_ua_result(result: &Value) -> bool {
+    result_contains_ci(result, "standardName", "pdf/ua")
+        || result_contains_ci(result, "validationProfileName", "pdf/ua")
+        || result_contains_ci(result, "standard", "ua")
+        || result_contains_ci(result, "validationProfile", "ua")
+}
+
+/// `ValidateComplianceController.isPdfa`: the "not-pdfa" placeholder is a
+/// PDF/A verdict too — the document declares no PDF/A.
+fn is_pdfa_result(result: &Value) -> bool {
+    if is_pdf_ua_result(result) {
+        return false;
+    }
+    result["declaredPdfa"].as_bool() == Some(true)
+        || result["standard"].as_str() == Some(verapdf::NOT_PDFA_ID)
+        || result_contains_ci(result, "standardName", "pdf/a")
+        || result_contains_ci(result, "validationProfileName", "pdf/a")
+}
+
+/// Java `String.length`-style truncation with the same `max - 3` ellipsis.
+fn truncate_chars(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    let keep: String = value.chars().take(max.saturating_sub(3)).collect();
+    format!("{keep}...")
+}
+
+/// `describeFailure`: `ruleId` (or `clause`) + ": " + message, each side
+/// truncated to Java's 120-char budget.
+fn describe_failure(issue: &Value) -> String {
+    let rule_id = issue["ruleId"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| issue["clause"].as_str().filter(|s| !s.trim().is_empty()));
+    let message = truncate_chars(
+        issue["message"].as_str().unwrap_or("").trim(),
+        120,
+    );
+    match rule_id {
+        None => message,
+        Some(rule) if message.is_empty() => rule.to_string(),
+        Some(rule) => format!("{rule}: {message}"),
+    }
+}
+
+/// `describeProfile`: first non-blank of standardName,
+/// validationProfileName, standard, then "PDF/A".
+fn describe_profile(result: &Value) -> String {
+    for key in ["standardName", "validationProfileName", "standard"] {
+        if let Some(v) = result[key].as_str().filter(|s| !s.trim().is_empty()) {
+            return v.to_string();
+        }
+    }
+    "PDF/A".into()
+}
+
+/// `buildViolationDetail` — the 460-char compliance error body.
+fn violation_detail(checked: &[&Value]) -> String {
+    if checked.is_empty() {
+        return "Document is not PDF/A compliant: the document does not declare PDF/A".into();
+    }
+    let failing: Vec<&&Value> = checked
+        .iter()
+        .filter(|r| r["compliant"].as_bool() != Some(true))
+        .collect();
+    let total_failures: i64 = failing
+        .iter()
+        .map(|r| r["totalFailures"].as_i64().unwrap_or(0))
+        .sum();
+    let failures: Vec<String> = failing
+        .iter()
+        .flat_map(|r| {
+            r["failures"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+        })
+        .take(3)
+        .map(|f| describe_failure(&f))
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut detail = format!(
+        "Document is not PDF/A compliant ({}): {} rule(s) failed",
+        describe_profile(failing[0]),
+        total_failures
+    );
+    if !failures.is_empty() {
+        detail.push_str(" - ");
+        detail.push_str(&failures.join(", "));
+    }
+    truncate_chars(&detail, 460)
+}
+
+/// `POST /api/v1/security/validate-compliance` —
+/// `ValidateComplianceController.validateCompliance`: PDF/A check that
+/// returns the document unchanged on compliance and fails the request
+/// otherwise, so pipelines cannot deliver a non-compliant file.
+#[stirling_macros::endpoint]
+fn validate_compliance(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    _params: Vec<(String, String)>,
+) -> AppResult<Response> {
+    let Some(upload) = uploads.into_iter().next() else {
+        return Err(AppError::BadRequest(format!("{FILE_FIELD} is required")));
+    };
+    pdfdoc::load(&upload.name, &upload.bytes)?;
+    let bytes = upload.bytes;
+    let name = upload.name;
+
+    let results = verification_results(&bytes);
+    let checked: Vec<&Value> = results.iter().filter(|r| is_pdfa_result(r)).collect();
+    let compliant =
+        !checked.is_empty() && checked.iter().all(|r| r["compliant"].as_bool() == Some(true));
+    if !compliant {
+        return Err(AppError::Unprocessable(format!(
+            "{}; the run was stopped.",
+            violation_detail(&checked)
+        )));
+    }
+
+    // `resolveFilename`: keep a `.pdf` extension — pipeline steps match
+    // the next step's accepted types against it.
+    let filename = {
+        let trimmed = name.trim();
+        let base = if trimmed.is_empty() {
+            "document.pdf"
+        } else {
+            trimmed
+        };
+        if base.to_lowercase().ends_with(".pdf") {
+            base.to_string()
+        } else {
+            format!("{base}.pdf")
+        }
+    };
+    Ok(crate::handlers::merge::file_response(
+        bytes.to_vec(),
+        &filename,
+        "application/pdf",
+    ))
 }
 
 #[cfg(test)]
@@ -3596,11 +3916,7 @@ mod tests {
             AppState::new(),
             HashMap::new(),
             upload(bytes),
-            params(&[]),
-            ExecuteRequest {
-                text_values: vec!["hello".into()],
-                ..Default::default()
-            },
+            params(&[("textValues", "[\"hello\"]")]),
         )
         .unwrap();
         assert_eq!(matches_header(&response).as_deref(), Some("1"));
@@ -3613,11 +3929,7 @@ mod tests {
             AppState::new(),
             HashMap::new(),
             upload(bytes),
-            params(&[]),
-            ExecuteRequest {
-                wipe_pages: vec![Some(1)],
-                ..Default::default()
-            },
+            params(&[("wipePages", "[1]")]),
         )
         .unwrap();
         // Wipes are not text-only, so no match-count header.
@@ -3642,7 +3954,6 @@ mod tests {
             HashMap::new(),
             upload(pdf_with_text("BT /F1 12 Tf 72 720 Td (hi) Tj ET")),
             params(&[]),
-            ExecuteRequest::default(),
         )
         .unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));

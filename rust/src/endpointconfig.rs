@@ -368,13 +368,10 @@ fn group_table() -> &'static [(&'static str, &'static [&'static str])] {
 /// Several are frontend-composed tools that decompose into routed calls —
 /// disabling the key would hide a working tool.
 const UNSUPPORTED_ENDPOINTS: &[&str] = &[
-    // CMS/PKCS#7 signing, RFC 3161 timestamps, signature validation —
-    // needs a crypto stack Rust does not have.
+    // CMS/PKCS#7 signing, RFC 3161 timestamps — needs a crypto stack Rust
+    // does not have.
     "cert-sign",
     "timestamp-pdf",
-    "validate-signature",
-    "verify-pdf",
-    "validate-compliance",
     // Proprietary modules with no Rust port.
     "ingest",
     "restore-pdf-protection",
@@ -990,9 +987,6 @@ mod tests {
         for key in [
             "cert-sign",
             "timestamp-pdf",
-            "validate-signature",
-            "verify-pdf",
-            "validate-compliance",
             "ingest",
             "restore-pdf-protection",
         ] {

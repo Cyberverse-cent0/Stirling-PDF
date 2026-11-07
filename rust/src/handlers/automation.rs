@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::multipart::Field;
-use axum::extract::{Multipart, Path as AxumPath, Query, State};
+use axum::extract::{Multipart, Path as AxumPath};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures_util::stream;
@@ -26,9 +26,7 @@ use crate::handlers::misc;
 use crate::pdfdoc;
 use crate::settings;
 use crate::text::{self, TextItem};
-use crate::upload::{
-    output_name, param, param_bool, receive_multipart, simple_name, Upload, FILE_FIELD,
-};
+use crate::upload::{output_name, param, param_bool, simple_name, Upload, FILE_FIELD};
 
 fn last_param<'a>(params: &'a [(String, String)], name: &str) -> Option<&'a str> {
     params
@@ -151,12 +149,13 @@ struct PageResult {
 /// The `text`/`auto` paths run natively on the positioned text extractor;
 /// pages the text signal cannot decide report `tesseractUnavailable`
 /// rather than a wrong guess.
-pub async fn auto_rotate_pdf(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint]
+fn auto_rotate_pdf(
+    state: AppState,
+    query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
     let mode = param(&params, "detectionMode", "auto").to_lowercase();
     if !matches!(mode.as_str(), "auto" | "text" | "osd") {
         return Err(AppError::BadRequest(
@@ -171,10 +170,10 @@ pub async fn auto_rotate_pdf(
                 .into(),
         ));
     }
-    misc::dispatch(state, query, uploads, params, auto_rotate_work).await
+    auto_rotate_impl(state, query, uploads, params)
 }
 
-fn auto_rotate_work(
+fn auto_rotate_impl(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,

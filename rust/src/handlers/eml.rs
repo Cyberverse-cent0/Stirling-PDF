@@ -20,7 +20,6 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use axum::extract::{Query, State};
 use axum::response::Response;
 use mail_parser::{Message, MessageParser};
 
@@ -28,8 +27,7 @@ use crate::error::{AppError, AppResult};
 use crate::handlers::convert::html_to_pdf_bytes;
 use crate::handlers::jobs::AppState;
 use crate::handlers::merge::{file_response, pdf_response};
-use crate::handlers::misc::dispatch;
-use crate::upload::{output_name, param, param_bool, receive_multipart, Upload};
+use crate::upload::{output_name, param, param_bool, Upload};
 
 const STYLES: &str = include_str!("email-pdf-styles.css");
 const MAX_HEADER_SCAN: usize = 8192;
@@ -63,16 +61,8 @@ struct EmailContent {
     attachments: Vec<EmailAttachment>,
 }
 
-pub async fn eml_to_pdf(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: axum::extract::Multipart,
-) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
-    dispatch(state, query, uploads, params, eml_to_pdf_work).await
-}
-
-fn eml_to_pdf_work(
+#[stirling_macros::endpoint]
+fn eml_to_pdf(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,

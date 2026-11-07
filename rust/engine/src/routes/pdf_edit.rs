@@ -16,6 +16,7 @@ async fn edit(
     State(state): State<AppState>,
     Json(request): Json<PdfEditRequest>,
 ) -> ApiResult<Json<PdfEditResponse>> {
-    let response = state.pdf_edit.handle(&request).await?;
+    let pdf_edit = state.runtime.load().pdf_edit.clone();
+    let response = pdf_edit.handle(&request).await?;
     Ok(Json(response))
 }

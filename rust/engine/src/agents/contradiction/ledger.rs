@@ -13,19 +13,20 @@ use regex::Regex;
 use crate::contracts::contradiction::Claim;
 
 // Strip punctuation that varies between contexts ("deadline:" vs "deadline —").
-static LABEL_NOISE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[:\-—_,.;!?\s]+").unwrap());
+static LABEL_NOISE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[:\-—_,.;!?\s]+").unwrap());
 // Common English articles and demonstratives that often pad subjects.
-static ARTICLES: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(?:the|a|an|this|that|these|those)\b").unwrap()
-});
+static ARTICLES: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(?:the|a|an|this|that|these|those)\b").unwrap());
 
 /// Lexical key for grouping subjects with no LLM help: lowercase, strip
 /// articles/demonstratives, collapse punctuation/whitespace to single spaces.
 fn normalise_subject(subject: &str) -> String {
     let lowered = subject.to_lowercase();
     let no_articles = ARTICLES.replace_all(&lowered, " ");
-    LABEL_NOISE.replace_all(&no_articles, " ").trim().to_string()
+    LABEL_NOISE
+        .replace_all(&no_articles, " ")
+        .trim()
+        .to_string()
 }
 
 pub struct ClaimLedger {
@@ -144,7 +145,10 @@ mod tests {
 
     #[test]
     fn normalise_strips_articles_and_punctuation() {
-        assert_eq!(normalise_subject("The Project Deadline:"), "project deadline");
+        assert_eq!(
+            normalise_subject("The Project Deadline:"),
+            "project deadline"
+        );
         assert_eq!(normalise_subject("a deadline — maybe"), "deadline maybe");
         assert_eq!(normalise_subject("   "), "");
     }
@@ -168,7 +172,10 @@ mod tests {
         ledger.record(claim("budget", 4));
         let mut mapping = HashMap::new();
         mapping.insert("project deadline".to_string(), "deadline".to_string());
-        mapping.insert("the deadline for the project".to_string(), "deadline".to_string());
+        mapping.insert(
+            "the deadline for the project".to_string(),
+            "deadline".to_string(),
+        );
         ledger.rekey_with_canonical(&mapping);
         let buckets = ledger.buckets();
         // deadline bucket now has 2 claims; budget bucket has 2 — both >= 2.

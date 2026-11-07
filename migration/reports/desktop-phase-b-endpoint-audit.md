@@ -170,28 +170,72 @@ disables each tool group when its binary is absent.
   Java's alternative was LibreOffice. Bundling `pdftohtml` (small)
   covers it.
 
-### Phase C — recommended per-platform engine set
+### Phase C — engine bundling (implemented)
 
-Tier 1 — bundle everywhere (small, high-value):
-`gs`, `qpdf`, `pdftohtml`, `rsvg-convert` (or `inkscape` fallback),
-`unrar`/`unar`/`bsdtar`/`7z` + `rar`. Covers pdf→img/vector/pdfa/epub,
-compress/repair, pdf→html, svg→pdf, cbr/cbz both ways, redact
-`convertPDFToImage`, flatten, remove-blanks, extract-image-scans.
+`stirling-desktop-build stage-engines` (build-tools, Rust — no shell)
+stages the Tier-1 set into `frontend/src-tauri/engines/`, wired as
+`task desktop:engines` inside `desktop:prepare` (rust backend variant
+only — `DESKTOP_BACKEND=java` skips it). `tauri.backend-rust.conf.json`
+ships the tree as `<resource_dir>/engines`; the Tauri shell exports
+`STIRLING_ENGINES_DIR` plus `LD_LIBRARY_PATH`/`DYLD_FALLBACK_LIBRARY_PATH`
+(engines/lib) and `GS_LIB` (engines/share/ghostscript) to the sidecar.
+In `tauri dev` the tree is mirrored to `src-tauri/binaries/engines` and
+found via the `<exe>/engines` convention.
 
-Tier 2 — bundle if size permits: `tesseract` + `ocrmypdf` + traineddata
-(~50 MB) for ocr-pdf/auto-rotate; `verapdf` for pdfa validation.
+Sourcing is the host package manager (the build host cannot produce
+other-OS binaries): Linux copies the resolved binary plus its `ldd`
+closure minus glibc core into `engines/lib`; macOS copies `otool -L`
+deps under the Homebrew prefixes, rewrites install names to
+`@loader_path`, and adhoc re-signs; Windows is a no-op (engines resolve
+from PATH, groups self-disable via probes). Ghostscript's `Resource/`
+tree is staged as `engines/share/ghostscript` when present.
 
-Tier 3 — do not bundle (each dominates installer size for narrow
-coverage): `weasyprint` (html/url/markdown/eml→pdf — Python+GTK),
-`soffice`/`unoconvert` (file→pdf, pdf→word/presentation/xml/rtf —
-~400 MB LibreOffice), `ebook-convert` (ebook↔epub — Calibre).
-These groups stay disabled on desktop; the endpoints report
-`DEPENDENCY`-disabled through the same availability surface, so the UI
-hides them consistently.
+Recommended set (what the task stages):
+`gs`, `qpdf`, `pdftohtml`, `rsvg-convert`, `inkscape`, `unrar`, `unar`,
+`bsdtar`, `7z`, `rar` — covers pdf→img/vector/pdfa/epub, compress/repair,
+pdf→html, svg→pdf, cbr/cbz both ways, redact `convertPDFToImage`,
+flatten, remove-blanks, extract-image-scans.
 
-Phase D prerequisite: a real `tauri build` on each OS — `cargo check`
-does not exercise `externalBin` resource resolution or the
-`binaries/stirling-server-<triple>` staging path.
+Size caveat: on a Fedora host the staged tree was ~113 MB — the full
+`ldd` closure pulls in ICU, GnuTLS, curl, etc. via `unar`/`7z`. That
+still nets positive against the ~100 MB+ JRE+JAR removal, but per-engine
+pruning (or dropping `unar`'s heaviest deps) is worth revisiting before
+release builds.
+
+Tier 2/3 unchanged: `tesseract`+`ocrmypdf`, `verapdf` stay PATH-probed;
+`weasyprint`, `soffice`/`unoconvert`, `ebook-convert` remain unbundled —
+their groups report `DEPENDENCY`-disabled through the availability
+surface.
+
+### Phase D — installer slimming (config mechanism in place)
+
+`bundle.resources` selection is now per-backend via `--config` merge
+overlays (JSON Merge Patch — arrays replace wholesale):
+
+- `tauri.backend-rust.conf.json` (the default, `${DESKTOP_BACKEND:-rust}`)
+  sets `resources: ["engines/**/*"]` — `libs/*.jar` and
+  `runtime/jre/**` are not bundled, and `externalBin` still ships
+  `stirling-server-<triple>`.
+- `tauri.backend-java.conf.json` sets `externalBin: []` and restores
+  `["libs/*.jar", "runtime/jre/**/*"]` for the legacy path.
+
+`desktop:prepare` runs `jlink` only when `DESKTOP_BACKEND=java`;
+otherwise it stages `rust-server` + `engines`. Every `tauri
+dev`/`build`/`build:dev:*` invocation passes the matching overlay, so
+`DESKTOP_BACKEND=java task desktop:build` reproduces the old installer.
+
+Linux verification (real `.deb` bundle): `usr/bin/stirling-server`
+(27 MB) + `usr/lib/Stirling PDF/engines/` (gs, 7z, pdftohtml, unar +
+`lib/` closure + `share/ghostscript`) shipped; zero `.jar`/`jre`
+entries. The smoke test exposed that `find_rust_server` never probed
+the main executable's directory — where Tauri installs sidecars on
+Linux (`/usr/bin`), macOS (`Contents/MacOS`) and Windows — so packaged
+builds would have fallen back to the missing JRE; fixed by adding the
+`current_exe` parent to the probe list.
+
+Still open: macOS/Windows installer builds, then deleting
+`BackendKind::Java` + the jlink tasks once the Rust installers are
+proven.
 
 ## Addendum — engine resolution for bundled desktop installs
 
@@ -207,3 +251,17 @@ order and passes qualified `customPaths` entries through untouched.
 Group probes (`ENGINE_PROBES`, `engine_available`) inherit the bundled
 dirs for free, so a bundled `gs` enables its groups exactly like a
 system-installed one.
+
+## Addendum 2 — engine payload staging (Phase C mechanism landed)
+
+`stirling-desktop-build stage-engines` assembles `src-tauri/engines/`
+on the build host: tier-1 binaries resolved on PATH, their shared-library
+closure (`ldd` traversal on Linux excluding glibc core; `otool` +
+`install_name_tool` `@loader_path` rewriting + adhoc `codesign` on macOS),
+and the Ghostscript `share/` tree. A `.keep` file keeps the
+`engines/**/*` resource glob valid when nothing is found, and the tree is
+mirrored to `binaries/engines/` so `tauri dev` sidecars resolve it via
+`<exe>/engines`. `tauri.conf.json` ships it via `bundle.resources`;
+`task desktop:engines` is a `prepare` dep. Verified live: server booted
+with `PATH=/nonexistent` + `STIRLING_ENGINES_DIR` → gs/pdftohtml/unar/7z
+groups enabled, qpdf correctly disabled.

@@ -23,7 +23,8 @@ pub fn extract_math_verdict(request: &OrchestratorRequest) -> Option<&Verdict> {
     })
 }
 
-const MATH_INTENT_SYSTEM_PROMPT: &str = "Decide whether the user's prompt is asking for verification of \
+const MATH_INTENT_SYSTEM_PROMPT: &str =
+    "Decide whether the user's prompt is asking for verification of \
 numerical content — math correctness, audit, recalculation, totals, \
 sums, percentages, balances, arithmetic, or financial figures. \
 Set is_math=true if so, otherwise false. Decide from the meaning of \
@@ -62,7 +63,10 @@ impl MathIntentClassifier {
 
     /// True when the prompt asks for numerical verification; empty prompts
     /// short-circuit without a model call.
-    pub async fn classify(&self, user_message: &str) -> Result<bool, crate::agents::runtime::AgentError> {
+    pub async fn classify(
+        &self,
+        user_message: &str,
+    ) -> Result<bool, crate::agents::runtime::AgentError> {
         if user_message.is_empty() {
             return Ok(false);
         }

@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 
-use axum::extract::{Multipart, Query, State};
 use axum::response::Response;
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, Timelike};
 use image::GenericImageView;
@@ -16,10 +15,10 @@ use rand::RngExt as _;
 use crate::error::{AppError, AppResult};
 use crate::handlers::jobs::AppState;
 use crate::handlers::merge::pdf_response;
-use crate::handlers::misc::{append_page_content, dispatch};
+use crate::handlers::misc::append_page_content;
 use crate::page_select;
 use crate::pdfdoc;
-use crate::upload::{output_name, param, param_bool, receive_files_multipart, Upload, FILE_FIELD};
+use crate::upload::{output_name, param, param_bool, Upload, FILE_FIELD};
 
 fn pdf_err(e: lopdf::Error) -> AppError {
     AppError::Pdf(e.to_string())
@@ -708,12 +707,14 @@ fn date_field(now: &NaiveDateTime, c: char, count: usize) -> Result<String, Java
 /// `POST /api/v1/misc/add-stamp` — `stampType=image` and `stampType=qr`
 /// are served natively; text stamps (NotoSans TTF embedding) are not
 /// implemented and rejected.
-pub async fn add_stamp(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint(files = "stampImage")]
+fn add_stamp(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    extras: Vec<(String, Upload)>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, extras, params) = receive_files_multipart(multipart, &["stampImage"]).await?;
     let stamp_image = extras
         .iter()
         .find(|(field, _)| field == "stampImage")
@@ -735,10 +736,7 @@ pub async fn add_stamp(
         }
         let stamp_text = param(&params, "stampText", "").to_string();
         require_qr_content(&stamp_text)?;
-        return dispatch(state, query, uploads, params, move |_s, _q, u, p| {
-            qr_stamp_work(u, p, stamp_text)
-        })
-        .await;
+        return qr_stamp_work(uploads, params, stamp_text);
     }
     if !resolved_image {
         return Err(AppError::BadRequest(
@@ -777,16 +775,12 @@ pub async fn add_stamp(
         ));
     }
 
-    // Move the image upload into the blocking work closure.
-    let image = Upload {
-        name: image.name.clone(),
-        bytes: image.bytes.clone(),
-        content_type: image.content_type.clone(),
-    };
-    dispatch(state, query, uploads, params, move |_s, _q, u, p| {
-        stamp_image_work(u, p, image)
-    })
-    .await
+    let image = extras
+        .into_iter()
+        .find(|(field, _)| field == "stampImage")
+        .map(|(_, upload)| upload)
+        .expect("stampImage presence checked above");
+    stamp_image_work(uploads, params, image)
 }
 
 fn stamp_image_work(
@@ -948,12 +942,14 @@ fn qr_stamp_work(
 /// `POST /api/v1/security/add-watermark` — only `watermarkType=image`
 /// without `convertPDFToImage` is served natively; text watermarks and
 /// the rasterising conversion are not implemented and rejected.
-pub async fn add_watermark(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint(files = "watermarkImage")]
+fn add_watermark(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    extras: Vec<(String, Upload)>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, extras, params) = receive_files_multipart(multipart, &["watermarkImage"]).await?;
     if param_bool(&params, "convertPDFToImage") {
         return Err(AppError::BadRequest(
             "add-watermark convertPDFToImage rasterises every page, which the Rust backend does not implement".into(),
@@ -1003,15 +999,12 @@ pub async fn add_watermark(
         ));
     }
 
-    let image = Upload {
-        name: image.name.clone(),
-        bytes: image.bytes.clone(),
-        content_type: image.content_type.clone(),
-    };
-    dispatch(state, query, uploads, params, move |_s, _q, u, p| {
-        watermark_image_work(u, p, image)
-    })
-    .await
+    let image = extras
+        .into_iter()
+        .find(|(field, _)| field == "watermarkImage")
+        .map(|(_, upload)| upload)
+        .expect("watermarkImage presence checked above");
+    watermark_image_work(uploads, params, image)
 }
 
 fn watermark_image_work(

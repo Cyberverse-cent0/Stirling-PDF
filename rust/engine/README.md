@@ -198,9 +198,16 @@ the Rust counterpart of `engine/scripts/generate_tool_models.py`:
 ./scripts/generate_tool_params.sh /path/to/SwaggerDoc.json
 ```
 
-Until generated, `ToolOperationStep.parameters` / execution `parameters`
-are `serde_json::Value` — wire-compatible; typed models are needed only
-for schema-driven prompt construction in the agent layer.
+`tool_params.rs` is committed (≈200 types from the full component map);
+regenerate it whenever the Java OpenAPI spec changes. The generator
+handles the two OpenAPI-3.0-vs-JSON-Schema gaps itself: boolean
+`exclusiveMinimum`/`exclusiveMaximum` are rewritten to numeric bounds,
+and `#/components/schemas/*` `$ref`s are retargeted into a synthetic
+`definitions` map (typify only emits titled root types).
+
+`ToolOperationStep.parameters` / execution `parameters` still stay
+`serde_json::Value` — the typed models exist for schema-driven prompt
+construction in the agent layer, which is not yet wired to them.
 
 ## Development
 

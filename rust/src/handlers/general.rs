@@ -4,7 +4,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use axum::extract::{Multipart, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use lopdf::{Document, Object, ObjectId};
@@ -13,10 +12,9 @@ use serde::Deserialize;
 use crate::error::{AppError, AppResult};
 use crate::handlers::jobs::AppState;
 use crate::handlers::merge::pdf_response;
-use crate::handlers::misc::dispatch;
 use crate::page_select;
 use crate::pdfdoc;
-use crate::upload::{output_name, param, receive_files_multipart, Upload, FILE_FIELD};
+use crate::upload::{output_name, param, Upload, FILE_FIELD};
 
 /// `POST /api/v1/general/rotate-pdf` — adds `angle` (a multiple of 90) to
 /// every page's existing rotation, like `PDPage.setRotation(getRotation()+a)`.
@@ -632,19 +630,18 @@ fn pdf_to_single_page(
 /// The base PDF arrives as `fileInput`, the overlays as repeated
 /// `overlayFiles` parts; `overlayMode` picks sequential, interleaved or
 /// fixed-repeat assignment of overlay pages to base pages.
-pub async fn overlay_pdfs(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint(files = "overlayFiles")]
+fn overlay_pdfs(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    extras: Vec<(String, Upload)>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, extras, params) = receive_files_multipart(multipart, &["overlayFiles"]).await?;
-    dispatch(state, query, uploads, params, move |_s, _q, u, p| {
-        overlay_pdfs_work(u, extras, p)
-    })
-    .await
+    overlay_pdfs_impl(uploads, extras, params)
 }
 
-fn overlay_pdfs_work(
+fn overlay_pdfs_impl(
     uploads: Vec<Upload>,
     extras: Vec<(String, Upload)>,
     params: Vec<(String, String)>,
@@ -886,19 +883,18 @@ fn to_outline_specs(items: &[BookmarkItem], total_pages: usize) -> Vec<pdfdoc::O
 
 /// `POST /api/v1/general/extract-bookmarks` — the file arrives as `file`,
 /// not `fileInput`, matching the Java `@RequestParam("file")`.
-pub async fn extract_bookmarks(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint(files = "file")]
+fn extract_bookmarks(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    extras: Vec<(String, Upload)>,
+    _params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, extras, params) = receive_files_multipart(multipart, &["file"]).await?;
-    dispatch(state, query, uploads, params, move |_s, _q, u, _p| {
-        extract_bookmarks_work(u, extras)
-    })
-    .await
+    extract_bookmarks_impl(uploads, extras)
 }
 
-fn extract_bookmarks_work(
+fn extract_bookmarks_impl(
     uploads: Vec<Upload>,
     extras: Vec<(String, Upload)>,
 ) -> AppResult<Response> {

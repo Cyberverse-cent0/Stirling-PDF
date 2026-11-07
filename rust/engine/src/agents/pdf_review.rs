@@ -53,7 +53,8 @@ const ICON_SIZE: f64 = 20.0;
 const DEFAULT_AUTHOR: &str = "Stirling Math Auditor";
 const CONTRADICTION_AUTHOR: &str = "Stirling Contradiction Auditor";
 
-const LOCALISER_SYSTEM_PROMPT: &str = "You are given a math-audit Verdict (structured JSON) and the user's \
+const LOCALISER_SYSTEM_PROMPT: &str =
+    "You are given a math-audit Verdict (structured JSON) and the user's \
 original review request. Produce one sticky-note entry per Discrepancy \
 the user would care about. Each entry carries the discrepancy's index \
 in the input list, a short subject (a few words), and a body of one or \
@@ -143,10 +144,7 @@ impl PdfReviewAgent {
                 review_localiser_prompt(),
                 &chat_provider,
             ),
-            math_intent_classifier: MathIntentClassifier::new(
-                fast_model.clone(),
-                &chat_provider,
-            ),
+            math_intent_classifier: MathIntentClassifier::new(fast_model.clone(), &chat_provider),
             contradiction_intent_classifier: ContradictionIntentClassifier::new(
                 fast_model.clone(),
                 &chat_provider,
@@ -168,9 +166,9 @@ impl PdfReviewAgent {
         // Resume turn comes first: a math verdict attached to the request is
         // projected into sticky-note specs.
         if let Some(verdict) = extract_math_verdict(request) {
-            let comments_json =
-                self.build_localised_comments_payload(&request.user_message, verdict)
-                    .await?;
+            let comments_json = self
+                .build_localised_comments_payload(&request.user_message, verdict)
+                .await?;
             return Ok(PdfReviewOrchestrateResponse::Plan(add_comments_plan(
                 comments_json,
                 None,
@@ -197,11 +195,7 @@ impl PdfReviewAgent {
             let user_id = require_current_user_id().map_err(ReviewError::NoUserId)?;
             let report = self
                 .contradiction_detector
-                .detect(
-                    &request.files,
-                    &[user_id],
-                    Some(&request.user_message),
-                )
+                .detect(&request.files, &[user_id], Some(&request.user_message))
                 .await?;
             let comments_json = self
                 .build_contradiction_comments_payload(&request.user_message, &report)
@@ -291,7 +285,10 @@ impl PdfReviewAgent {
     }
 }
 
-fn add_comments_plan(comments_json: String, resume_with: Option<SupportedCapability>) -> EditPlanPayload {
+fn add_comments_plan(
+    comments_json: String,
+    resume_with: Option<SupportedCapability>,
+) -> EditPlanPayload {
     EditPlanPayload {
         summary: String::new(),
         rationale: None,

@@ -12,8 +12,6 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
-use axum::extract::{Multipart, OriginalUri, Query, State};
-use axum::http::HeaderMap;
 use axum::response::Response;
 use base64::Engine as _;
 use image::{GenericImage, GenericImageView};
@@ -23,17 +21,14 @@ use zip::{CompressionMethod, ZipWriter};
 
 use crate::convert::{self, EngineSpec};
 use crate::error::{AppError, AppResult};
-use crate::handlers::jobs::{self, AppState};
+use crate::handlers::jobs::AppState;
 use crate::handlers::merge::{file_response, pdf_response};
-use crate::handlers::misc::dispatch;
 use crate::page_select;
 use crate::pdfdoc;
 use crate::settings;
 use crate::tabula;
 use crate::text;
-use crate::upload::{
-    first_upload, output_name, param, param_bool, receive_multipart, Upload, FILE_FIELD,
-};
+use crate::upload::{first_upload, output_name, param, param_bool, Upload};
 
 /// `POST /api/v1/convert/img/pdf` — `PdfUtils.imageToPdf`. Every format
 /// the `image` crate decodes converts natively (JPEG keeps its
@@ -41,28 +36,18 @@ use crate::upload::{
 /// rather than round-tripping anywhere. The whole request fails when
 /// any part is unsupported — Java's `MultipartFile[]` semantics are
 /// all-or-nothing.
-pub async fn img_pdf(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    _headers: HeaderMap,
-    _uri: OriginalUri,
-    multipart: Multipart,
-) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
-    if uploads.is_empty() || !uploads.iter().all(native_supported) {
-        return Err(AppError::BadRequest(
-            "one or more uploaded files are not a supported image format".into(),
-        ));
-    }
-    dispatch(state, query, uploads, params, img_pdf_work).await
-}
-
-fn img_pdf_work(
+#[stirling_macros::endpoint]
+fn img_pdf(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
     params: Vec<(String, String)>,
 ) -> AppResult<Response> {
+    if uploads.is_empty() || !uploads.iter().all(native_supported) {
+        return Err(AppError::BadRequest(
+            "one or more uploaded files are not a supported image format".into(),
+        ));
+    }
     // Java normalizes on isEmpty()/isBlank(), so an explicitly blank form
     // field gets the default rather than falling through to no draw branch.
     let fit = param(&params, "fitOption", "fillPage");
@@ -582,25 +567,6 @@ fn read_dir_files(dir: &Path) -> AppResult<Vec<PathBuf>> {
 // PDF → image (`/convert/pdf/img`, ConvertImgPDFController.convertToImage)
 // ---------------------------------------------------------------------------
 
-/// Rasterises through Ghostscript; formats without a gs device render to
-/// PNG first and are transcoded via the `image` crate.
-pub async fn pdf_to_img(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    _headers: HeaderMap,
-    _uri: OriginalUri,
-    multipart: Multipart,
-) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
-    let format = param(&params, "imageFormat", "png").to_ascii_lowercase();
-    if uploads.is_empty() || !PDF_IMAGE_FORMATS.contains(&format.as_str()) {
-        return Err(AppError::BadRequest(format!(
-            "unsupported imageFormat: {format}"
-        )));
-    }
-    dispatch(state, query, uploads, params, pdf_to_img_work).await
-}
-
 /// Formats `/convert/pdf/img` emits. `png`/`jpeg` go straight out of the
 /// Ghostscript device; the rest render to PNG and are transcoded through
 /// the `image` crate (its WebP encoder is lossless-only — Java's PIL
@@ -619,14 +585,22 @@ fn pdf_image_mime(format: &str) -> &'static str {
     }
 }
 
-fn pdf_to_img_work(
+/// Rasterises through Ghostscript; formats without a gs device render to
+/// PNG first and are transcoded via the `image` crate.
+#[stirling_macros::endpoint]
+fn pdf_to_img(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
     params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let upload = first_upload(uploads)?;
     let format = param(&params, "imageFormat", "png").to_ascii_lowercase();
+    if uploads.is_empty() || !PDF_IMAGE_FORMATS.contains(&format.as_str()) {
+        return Err(AppError::BadRequest(format!(
+            "unsupported imageFormat: {format}"
+        )));
+    }
+    let upload = first_upload(uploads)?;
     let color = param(&params, "colorType", "color");
     let single = param(&params, "singleOrMultiple", "multiple") == "single";
 
@@ -815,21 +789,8 @@ fn stitch_pages(pages: &[PathBuf], format: &str, color: &str) -> AppResult<Vec<u
 /// and zip the PNGs as `page_%03d.png`, matching `PdfToCbzUtils`. Java
 /// renders via PDFBox; pixels differ between renderers but the container
 /// format and naming are identical.
-pub async fn pdf_to_cbz(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    _headers: HeaderMap,
-    _uri: OriginalUri,
-    multipart: Multipart,
-) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
-    if uploads.is_empty() {
-        return Err(AppError::BadRequest(format!("{FILE_FIELD} is required")));
-    }
-    dispatch(state, query, uploads, params, pdf_to_cbz_work).await
-}
-
-fn pdf_to_cbz_work(
+#[stirling_macros::endpoint]
+fn pdf_to_cbz(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
@@ -1080,27 +1041,19 @@ fn collect_files_recursive(dir: &Path, prefix: &str, out: &mut Vec<(String, Path
 /// sized to the pixel dimensions. Java decodes RAR in-process (junrar);
 /// Rust needs one of [`RAR_EXTRACTORS`] on PATH — there is no Java
 /// fallback, so a missing extractor is a hard dependency error.
-pub async fn cbr_pdf(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint]
+fn cbr_pdf(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
     if !rar_extractor_available() {
         return Err(AppError::Internal(anyhow::anyhow!(
             "missing dependency: install one of {} to convert CBR/RAR archives",
             RAR_EXTRACTORS.join(", ")
         )));
     }
-    dispatch(state, query, uploads, params, cbr_pdf_work).await
-}
-
-fn cbr_pdf_work(
-    _state: AppState,
-    _query: HashMap<String, String>,
-    uploads: Vec<Upload>,
-    params: Vec<(String, String)>,
-) -> AppResult<Response> {
     let upload = first_upload(uploads)?;
     let filename = upload
         .name
@@ -1202,16 +1155,8 @@ fn cbr_pdf_work(
 /// `rar` CLI exactly like Java (`rar a -m5 -ep1 output.cbr page_*.png`).
 /// The `rar` group probe in `endpointconfig` already 403s this endpoint
 /// when the binary is absent, matching Java's group-enable semantics.
-pub async fn pdf_to_cbr(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
-) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
-    dispatch(state, query, uploads, params, pdf_to_cbr_work).await
-}
-
-fn pdf_to_cbr_work(
+#[stirling_macros::endpoint]
+fn pdf_to_cbr(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
@@ -1301,16 +1246,8 @@ fn pdf_to_cbr_work(
 /// Java sanitises the SVG DOM before rendering; the Rust path rejects the
 /// same active-content markers up front instead. The renderers used here
 /// (librsvg, Inkscape) do not execute script either way.
-pub async fn svg_to_pdf(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
-) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
-    dispatch(state, query, uploads, params, svg_to_pdf_work).await
-}
-
-fn svg_to_pdf_work(
+#[stirling_macros::endpoint]
+fn svg_to_pdf(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
@@ -1528,18 +1465,8 @@ fn cbz_image_entry(name: &str) -> bool {
 /// `POST /api/v1/convert/cbz/pdf` — unzip, natural-sort the image entries,
 /// one PDF page per image sized to the pixel dimensions (Java's
 /// `PDRectangle(image.width, image.height)` + `drawImage(img, 0, 0)`).
-pub async fn cbz_pdf(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    _headers: HeaderMap,
-    _uri: OriginalUri,
-    multipart: Multipart,
-) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
-    dispatch(state, query, uploads, params, cbz_pdf_work).await
-}
-
-fn cbz_pdf_work(
+#[stirling_macros::endpoint]
+fn cbz_pdf(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
@@ -1700,16 +1627,8 @@ fn office_extension(filename: &str) -> Option<String> {
 /// `office_convert`. `useStirlingOfficeConvert` selects Java's in-process
 /// converter, which has no Rust equivalent; the flag is accepted but the
 /// LibreOffice path always runs (documented divergence).
-pub async fn office_to_pdf(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
-) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
-    dispatch(state, query, uploads, params, office_to_pdf_work).await
-}
-
-fn office_to_pdf_work(
+#[stirling_macros::endpoint]
+fn office_to_pdf(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
@@ -1859,17 +1778,14 @@ enum PdfToOffice {
 
 macro_rules! pdf_to_office_route {
     ($name:ident, $kind:expr) => {
-        pub async fn $name(
-            state: State<AppState>,
-            query: Query<HashMap<String, String>>,
-            multipart: Multipart,
+        #[stirling_macros::endpoint]
+        fn $name(
+            state: AppState,
+            query: HashMap<String, String>,
+            uploads: Vec<Upload>,
+            params: Vec<(String, String)>,
         ) -> AppResult<Response> {
-            let (uploads, params) = receive_multipart(multipart).await?;
-            let kind = $kind;
-            dispatch(state.0, query.0, uploads, params, move |s, q, u, p| {
-                pdf_to_office_work(s, q, u, p, kind)
-            })
-            .await
+            pdf_to_office_work(state, query, uploads, params, $kind)
         }
     };
 }
@@ -1977,16 +1893,8 @@ fn pdf_to_office_work(
 /// produces a PDF via WeasyPrint — documented divergence). HTML
 /// sanitisation is not ported; `--allowed-protocols data` keeps the same
 /// resource restriction Java applies to sanitised input.
-pub async fn html_to_pdf(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
-) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
-    dispatch(state, query, uploads, params, html_to_pdf_work).await
-}
-
-fn html_to_pdf_work(
+#[stirling_macros::endpoint]
+fn html_to_pdf(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
@@ -2223,16 +2131,8 @@ fn url_error_redirect(reason: &str) -> Response {
 /// `POST /api/v1/convert/url/pdf` — fetch a remote page and print it with
 /// WeasyPrint. Java's `system.enableUrlToPDF` gate is enforced upstream by
 /// `endpointconfig`/`api_guard`, which 403s like Java's interceptor.
-pub async fn url_to_pdf(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
-) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
-    dispatch(state, query, uploads, params, url_to_pdf_work).await
-}
-
-fn url_to_pdf_work(
+#[stirling_macros::endpoint]
+fn url_to_pdf(
     _state: AppState,
     _query: HashMap<String, String>,
     _uploads: Vec<Upload>,
@@ -2659,16 +2559,8 @@ fn collapse_underscores(s: &str) -> String {
 /// `POST /api/v1/convert/markdown/pdf` — Markdown (or a ZIP of Markdown +
 /// assets) → HTML via commonmark → WeasyPrint. `useStirlingOfficeConvert`
 /// is accepted but ignored, same divergence as `html_to_pdf`.
-pub async fn markdown_to_pdf(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
-) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
-    dispatch(state, query, uploads, params, markdown_to_pdf_work).await
-}
-
-fn markdown_to_pdf_work(
+#[stirling_macros::endpoint]
+fn markdown_to_pdf(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
@@ -2871,20 +2763,13 @@ const EBOOK_EXTENSIONS: &[&str] = &["epub", "mobi", "azw3", "fb2", "txt", "docx"
 /// `useStirlingOfficeConvert` (Stirling Office Convert engine) and `.docx`
 /// inputs (the OOXML external-reference sanitizer) are rejected — neither
 /// engine nor sanitizer is ported.
-pub async fn ebook_to_pdf(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    _headers: HeaderMap,
-    _uri: OriginalUri,
-    multipart: Multipart,
+#[stirling_macros::endpoint]
+fn ebook_to_pdf(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
-    let is_docx = uploads.first().is_some_and(|u| {
-        let name = u.name.rsplit(['/', '\\']).next().unwrap_or(&u.name);
-        name.rsplit('.')
-            .next()
-            .is_some_and(|e| e.eq_ignore_ascii_case("docx"))
-    });
     if office_convert_requested(&params) {
         return Err(AppError::BadRequest(
             "useStirlingOfficeConvert selects the Stirling Office Convert \
@@ -2892,6 +2777,12 @@ pub async fn ebook_to_pdf(
                 .into(),
         ));
     }
+    let is_docx = uploads.first().is_some_and(|u| {
+        let name = u.name.rsplit(['/', '\\']).next().unwrap_or(&u.name);
+        name.rsplit('.')
+            .next()
+            .is_some_and(|e| e.eq_ignore_ascii_case("docx"))
+    });
     if is_docx {
         return Err(AppError::BadRequest(
             "docx inputs require the OOXML external-reference sanitizer, \
@@ -2899,15 +2790,6 @@ pub async fn ebook_to_pdf(
                 .into(),
         ));
     }
-    dispatch(state, query, uploads, params, ebook_to_pdf_work).await
-}
-
-fn ebook_to_pdf_work(
-    _state: AppState,
-    _query: HashMap<String, String>,
-    uploads: Vec<Upload>,
-    params: Vec<(String, String)>,
-) -> AppResult<Response> {
     let upload = first_upload(uploads)?;
     let filename = upload
         .name
@@ -3035,29 +2917,19 @@ fn gs_ebook_optimize(pdf: &[u8]) -> Option<Vec<u8>> {
 /// `useStirlingOfficeConvert` is rejected (Office Convert engine
 /// unported); the Calibre group probe in `endpointconfig` 403s when the
 /// binary is absent, matching Java's group-enable check.
-pub async fn pdf_to_epub(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    _headers: HeaderMap,
-    _uri: OriginalUri,
-    multipart: Multipart,
+#[stirling_macros::endpoint]
+fn pdf_to_epub(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
     if office_convert_requested(&params) {
         return Err(AppError::BadRequest(
             "useStirlingOfficeConvert selects the Stirling Office Convert              engine, which the Rust backend does not implement"
                 .into(),
         ));
     }
-    dispatch(state, query, uploads, params, pdf_to_epub_work).await
-}
-
-fn pdf_to_epub_work(
-    _state: AppState,
-    _query: HashMap<String, String>,
-    uploads: Vec<Upload>,
-    params: Vec<(String, String)>,
-) -> AppResult<Response> {
     let upload = first_upload(uploads)?;
     let filename = upload
         .name
@@ -3174,16 +3046,8 @@ fn pdf_to_epub_work(
 
 /// `POST /api/v1/convert/vector/pdf` — Ghostscript `pdfwrite` for PS/EPS;
 /// a `.pdf` upload passes through unchanged, everything else is rejected.
-pub async fn vector_to_pdf(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
-) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
-    dispatch(state, query, uploads, params, vector_to_pdf_work).await
-}
-
-fn vector_to_pdf_work(
+#[stirling_macros::endpoint]
+fn vector_to_pdf(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
@@ -3244,16 +3108,8 @@ fn vector_to_pdf_work(
 
 /// `POST /api/v1/convert/pdf/vector` — Ghostscript vector devices
 /// (eps2write/ps2write/pxlcolor/xpswrite).
-pub async fn pdf_to_vector(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
-) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
-    dispatch(state, query, uploads, params, pdf_to_vector_work).await
-}
-
-fn pdf_to_vector_work(
+#[stirling_macros::endpoint]
+fn pdf_to_vector(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
@@ -3322,16 +3178,8 @@ fn pdf_to_vector_work(
 /// `pdftohtml -c` produces the page HTML plus extracted assets; Java zips
 /// the whole output directory. The Stirling Office Convert branch is not
 /// ported (`useStirlingOfficeConvert` accepted, WeasyPrint-free path only).
-pub async fn pdf_to_html(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
-) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
-    dispatch(state, query, uploads, params, pdf_to_html_work).await
-}
-
-fn pdf_to_html_work(
+#[stirling_macros::endpoint]
+fn pdf_to_html(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
@@ -3487,15 +3335,13 @@ impl std::fmt::Debug for PdfaWork {
 /// skipping validation. The PDFBox sanitizer Java runs before
 /// Ghostscript (font, annotation, separation-colour and transparency
 /// repairs) is not ported; Ghostscript handles most repairs itself.
-pub async fn pdf_to_pdfa(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    _headers: HeaderMap,
-    _uri: OriginalUri,
-    multipart: Multipart,
+#[stirling_macros::endpoint]
+fn pdf_to_pdfa(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
-
     if office_convert_requested(&params) {
         return Err(AppError::BadRequest(
             "useStirlingOfficeConvert selects the Stirling Office Convert \
@@ -3503,24 +3349,11 @@ pub async fn pdf_to_pdfa(
                 .into(),
         ));
     }
-
-    let async_req = jobs::async_requested(&query, &params);
-    let attempt = async move {
-        let outcome = tokio::task::spawn_blocking(move || pdfa_work(uploads, params))
-            .await
-            .map_err(|e| AppError::Internal(anyhow::Error::new(e)))?;
-        match outcome? {
-            PdfaWork::Respond(response) => Ok(response),
-            PdfaWork::GsFailed(detail) => Err(AppError::Internal(anyhow::anyhow!(
-                "PDF/A conversion failed: {detail}"
-            ))),
-        }
-    };
-
-    if async_req {
-        jobs::submit(&state, attempt).await
-    } else {
-        attempt.await
+    match pdfa_work(uploads, params)? {
+        PdfaWork::Respond(response) => Ok(response),
+        PdfaWork::GsFailed(detail) => Err(AppError::Internal(anyhow::anyhow!(
+            "PDF/A conversion failed: {detail}"
+        ))),
     }
 }
 
@@ -3610,7 +3443,7 @@ pub(crate) fn pdfa_post_process(pdf: &[u8], params: &[(String, String)]) -> AppR
 /// `customPaths.operations` override every other engine honours. It is a
 /// validator, not a converter, so it is deliberately not an
 /// `ENGINE_PROBES` entry — its absence must not disable the endpoint.
-fn verapdf_program() -> Option<PathBuf> {
+pub(crate) fn verapdf_program() -> Option<PathBuf> {
     static VERAPDF: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     VERAPDF
         .get_or_init(|| {
@@ -3628,7 +3461,7 @@ fn verapdf_flavour(profile: &PdfaProfile) -> String {
     format!("{}{}", profile.part, level)
 }
 
-enum VeraOutcome {
+pub(crate) enum VeraOutcome {
     Compliant,
     NonCompliant(String),
     /// CLI absent — only reachable when `strict` is false.
@@ -3637,7 +3470,7 @@ enum VeraOutcome {
     Error(String),
 }
 
-fn run_verapdf(pdf: &[u8], flavour: Option<&str>, dir: &Path) -> VeraOutcome {
+pub(crate) fn run_verapdf(pdf: &[u8], flavour: Option<&str>, dir: &Path) -> VeraOutcome {
     let Some(program) = verapdf_program() else {
         return VeraOutcome::Unavailable;
     };
@@ -4099,16 +3932,8 @@ fn csv_fragment_bytes(fragment: &TableFragment) -> Vec<u8> {
 }
 
 /// `POST /api/v1/convert/pdf/csv` — `ExtractCSVController.pdfToCsv`.
-pub async fn pdf_to_csv(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
-) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
-    dispatch(state, query, uploads, params, pdf_to_csv_work).await
-}
-
-fn pdf_to_csv_work(
+#[stirling_macros::endpoint]
+fn pdf_to_csv(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
@@ -4155,29 +3980,19 @@ fn pdf_to_csv_work(
 /// `system.stirlingOfficeConversion` default) selects an engine the
 /// Rust backend does not implement and is rejected like the other
 /// converters' office branches.
-pub async fn pdf_to_xlsx(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    _headers: HeaderMap,
-    _uri: OriginalUri,
-    multipart: Multipart,
+#[stirling_macros::endpoint]
+fn pdf_to_xlsx(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
     if office_convert_requested(&params) {
         return Err(AppError::BadRequest(
             "useStirlingOfficeConvert selects the Stirling Office Convert              engine, which the Rust backend does not implement"
                 .into(),
         ));
     }
-    dispatch(state, query, uploads, params, pdf_to_xlsx_work).await
-}
-
-fn pdf_to_xlsx_work(
-    _state: AppState,
-    _query: HashMap<String, String>,
-    uploads: Vec<Upload>,
-    params: Vec<(String, String)>,
-) -> AppResult<Response> {
     let upload = first_upload(uploads)?;
     let doc = pdfdoc::load(&upload.name, &upload.bytes)?;
     let total = pdfdoc::page_ids(&doc).len();
@@ -4292,29 +4107,19 @@ fn resources_have_image(doc: &Document, resources: &Object, visited: &mut HashSe
 /// `POST /api/v1/convert/pdf/markdown` — the proprietary layout-aware
 /// pipeline (`AdvancedPdfMarkdownConverter`) ported in `pdftext`. The
 /// Office-Convert branch has no Rust port and is rejected.
-pub async fn pdf_to_markdown(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    _headers: HeaderMap,
-    _uri: OriginalUri,
-    multipart: Multipart,
+#[stirling_macros::endpoint]
+fn pdf_to_markdown(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
     if office_convert_requested(&params) {
         return Err(AppError::BadRequest(
             "useStirlingOfficeConvert selects the Stirling Office Convert              engine, which the Rust backend does not implement"
                 .into(),
         ));
     }
-    dispatch(state, query, uploads, params, pdf_to_markdown_work).await
-}
-
-fn pdf_to_markdown_work(
-    _state: AppState,
-    _query: HashMap<String, String>,
-    uploads: Vec<Upload>,
-    _params: Vec<(String, String)>,
-) -> AppResult<Response> {
     let upload = first_upload(uploads)?;
     let doc = pdfdoc::load(&upload.name, &upload.bytes)?;
     let markdown = crate::pdftext::converter::convert(&doc);

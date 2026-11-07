@@ -38,7 +38,7 @@ pub async fn engine_auth(
     if is_public(req.uri().path()) {
         return next.run(req).await;
     }
-    let settings = &state.settings;
+    let settings = state.runtime.load().settings.clone();
     if !settings.engine_shared_secret.is_empty() {
         let offered = req
             .headers()
@@ -80,7 +80,14 @@ pub async fn user_id(req: Request, next: Next) -> Response {
     if let Some(id) = user_id.clone() {
         req.extensions_mut().insert(RequestUserId(id));
     }
-    crate::services::tracking::scoped(user_id, next.run(req)).await
+    crate::services::tracking::scoped(user_id, async move {
+        crate::services::tracking::scoped_trace(
+            uuid::Uuid::new_v4().to_string(),
+            next.run(req),
+        )
+        .await
+    })
+    .await
 }
 
 /// Extractor/guard equivalent of `require_user_id`: 401 when `X-User-Id` is absent.
@@ -110,7 +117,8 @@ pub async fn require_user_id_gate(
     req: Request,
     next: Next,
 ) -> Response {
-    if state.settings.require_user_id && req.headers().get(USER_ID_HEADER).is_none() {
+    if state.runtime.load().settings.require_user_id && req.headers().get(USER_ID_HEADER).is_none()
+    {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({"detail": "X-User-Id header is required"})),

@@ -18,6 +18,7 @@ anyhow = "1"
 thiserror = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 futures-util = "0.3"
+tokio-stream = "0.1"
 bytes = "1"
 dotenvy = "0.15"
 subtle = "2"
@@ -33,6 +34,16 @@ sqlx = { version = "0.8", default-features = false, features = [
     "json",
 ] }
 rust_decimal = "1.43.0"
+uuid = { version = "1", features = ["serde", "v4"] }
+regress = "0.10"
+arc-swap = "1"
+aes = "0.8"
+cbc = { version = "0.1", features = ["block-padding"] }
+hmac = "0.12"
+sha2 = "0.10"
+hkdf = "0.12"
+base64 = "0.22"
+getrandom = "0.2"
 
 [profile.dev.package."*"]
 opt-level = 2

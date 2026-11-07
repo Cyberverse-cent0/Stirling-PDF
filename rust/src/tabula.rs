@@ -2239,12 +2239,42 @@ fn table_from_region(
         return None;
     }
 
+    // A word belongs to the band it overlaps most — center-in-gutter
+    // spanning cells still land somewhere. Words entirely inside a
+    // gutter (wide merged cells) fall back to the nearest band.
+    let band_for = |w: &WordBox| -> Option<usize> {
+        let mut best: Option<(usize, f64)> = None;
+        for (b, &(b0, b1)) in bands.iter().enumerate() {
+            let ov = w.rect.right().min(b1) - w.rect.x.max(b0);
+            if ov > 0.0 && best.is_none_or(|(_, bo)| ov > bo) {
+                best = Some((b, ov));
+            }
+        }
+        if let Some((b, _)) = best {
+            return Some(b);
+        }
+        let cx = (w.rect.x + w.rect.right()) / 2.0;
+        bands
+            .iter()
+            .position(|&(b0, b1)| cx >= b0 && cx < b1)
+            .or_else(|| {
+                bands
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| {
+                        let da = if cx < a.0 { a.0 - cx } else { cx - a.1 };
+                        let db = if cx < b.0 { b.0 - cx } else { cx - b.1 };
+                        cmp_f64(da, db)
+                    })
+                    .map(|(i, _)| i)
+            })
+    };
+
     let mut rows: Vec<Vec<String>> = Vec::new();
     for &i in region {
         let mut cells: Vec<Vec<&WordBox>> = vec![Vec::new(); bands.len()];
         for w in &lines[i].words {
-            let cx = (w.rect.x + w.rect.right()) / 2.0;
-            if let Some(b) = bands.iter().position(|&(b0, b1)| cx >= b0 && cx < b1) {
+            if let Some(b) = band_for(w) {
                 cells[b].push(w);
             }
         }
@@ -2257,7 +2287,9 @@ fn table_from_region(
                     .join(" ")
             })
             .collect();
-        if row.iter().filter(|c| !c.is_empty()).count() >= 2 {
+        // Rows that collapse to one cell are spanning/title rows — keep
+        // them so merged-cell text is not silently lost.
+        if row.iter().any(|c| !c.is_empty()) {
             rows.push(row);
         }
     }

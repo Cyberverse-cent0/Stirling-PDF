@@ -198,6 +198,7 @@ pub struct Security {
     pub oauth2: OAuth2Settings,
     pub saml2: Saml2Settings,
     pub timestamp: TimestampSettings,
+    pub validation: ValidationSettings,
 }
 
 impl Default for Security {
@@ -208,6 +209,65 @@ impl Default for Security {
             oauth2: OAuth2Settings::default(),
             saml2: Saml2Settings::default(),
             timestamp: TimestampSettings::default(),
+            validation: ValidationSettings::default(),
+        }
+    }
+}
+
+/// `security.validation` — PDF signature validation settings, mirroring
+/// Java's `ApplicationProperties.Security.Validation` defaults.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ValidationSettings {
+    pub trust: ValidationTrust,
+    pub allow_aia: bool,
+    pub revocation: ValidationRevocation,
+}
+
+impl Default for ValidationSettings {
+    fn default() -> Self {
+        Self {
+            trust: ValidationTrust::default(),
+            allow_aia: false,
+            revocation: ValidationRevocation::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ValidationTrust {
+    pub server_as_anchor: bool,
+    pub use_system_trust: bool,
+    pub use_mozilla_bundle: bool,
+    pub use_aatl: bool,
+    pub use_eutl: bool,
+}
+
+impl Default for ValidationTrust {
+    fn default() -> Self {
+        Self {
+            server_as_anchor: true,
+            use_system_trust: true,
+            use_mozilla_bundle: true,
+            use_aatl: false,
+            use_eutl: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ValidationRevocation {
+    pub mode: String,
+    pub hard_fail: bool,
+}
+
+impl Default for ValidationRevocation {
+    fn default() -> Self {
+        Self {
+            mode: "none".to_string(),
+            hard_fail: false,
         }
     }
 }

@@ -2,12 +2,18 @@
 //! Ports of `stirling.api.routes.agent_capabilities` and
 //! `stirling.api.routes.execution`.
 
+use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use schemars::JsonSchema;
 use serde_json::{json, Value};
 
-use crate::contracts::agent_drafts::{AgentDraftRequest, AgentRevisionRequest};
+use crate::agents::runtime::AgentError;
+use crate::agents::user_spec::UserSpecAgent;
+use crate::contracts::agent_drafts::{
+    AgentDraftRequest, AgentDraftWorkflowResponse, AgentRevisionRequest,
+    AgentRevisionWorkflowResponse,
+};
 use crate::contracts::execution::{
     AgentExecutionRequest, CannotContinueExecutionPayload, NextExecutionAction,
 };
@@ -22,6 +28,43 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/capabilities", get(capabilities))
         .route("/next-action", post(next_action))
+        .route("/draft", post(draft))
+        .route("/revise", post(revise))
+}
+
+fn user_spec(state: &AppState) -> UserSpecAgent {
+    let runtime = state.runtime.load();
+    UserSpecAgent::new(
+        runtime.smart_model.clone(),
+        &runtime.settings.chat_provider,
+        runtime.pdf_edit.clone(),
+    )
+}
+
+fn agent_error(e: AgentError) -> crate::error::ApiError {
+    crate::error::ApiError::internal(format!("agent draft failed: {e}"))
+}
+
+async fn draft(
+    State(state): State<AppState>,
+    Json(request): Json<AgentDraftRequest>,
+) -> ApiResult<Json<AgentDraftWorkflowResponse>> {
+    let response = user_spec(&state)
+        .draft(&request)
+        .await
+        .map_err(agent_error)?;
+    Ok(Json(response))
+}
+
+async fn revise(
+    State(state): State<AppState>,
+    Json(request): Json<AgentRevisionRequest>,
+) -> ApiResult<Json<AgentRevisionWorkflowResponse>> {
+    let response = user_spec(&state)
+        .revise(&request)
+        .await
+        .map_err(agent_error)?;
+    Ok(Json(response))
 }
 
 struct Capability {

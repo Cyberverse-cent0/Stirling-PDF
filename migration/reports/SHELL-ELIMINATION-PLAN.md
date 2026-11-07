@@ -31,12 +31,18 @@ see `SHELL-SCRIPT-INVENTORY.md` for the per-script audit.
    deleted, along with `test-all.sh`, `test-unit.sh`, `test-engine.sh`
    (all replaced earlier). `rust/tests/scripts/` is now empty;
    `rust/tests/README.md` and `rust/TESTING.md` document the CLI commands.
-3. **`stirling-diagnostics.sh` parity**: extend `diagnose` to collect the
-   same bundle (logs, configs, versions) the shell version produced for
-   the proprietary deployment before retiring it.
-4. **Engine install UX**: `stirling engines install <name>` with explicit
-   per-OS package-manager mapping (dnf/apt/apk/brew/winget) — still no
-   silent installs; always prompt/print the command.
+3. ~~**`stirling-diagnostics.sh` parity**~~ — done for the Rust
+   deployment: `stirling diagnose` now writes diagnostics table,
+   engines JSON, system info (os-release/uname/tool+engine versions),
+   redacted settings copies, and configs/.run trees. The shell script's
+   proprietary-deployment extras (live metrics endpoints, /customFiles,
+   /pipeline volumes, tar.gz packaging) have no Rust counterpart and
+   retire with the Java deployment.
+4. ~~**Engine install UX**~~ — done: `stirling engines install <name>`
+   resolves dnf/apt/apk/pacman (os-release), brew and winget package
+   specs, prints the command, prompts (or `--yes`), and re-detects
+   afterwards. Engines without a known package print manual-install
+   guidance.
 
 ## Phase 3 — Later
 

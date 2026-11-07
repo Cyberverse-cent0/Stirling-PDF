@@ -13,26 +13,28 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::agents::contradiction::{ContradictionCapability, ContradictionDetector, DEFAULT_MAX_AUDITS};
+use crate::agents::chunked_mapper::ChunkedMapperError;
+use crate::agents::chunked_reasoner::{ChunkedReasoner, ChunkedReasonerError};
+use crate::agents::contradiction::detector::DetectorError;
+use crate::agents::contradiction::{
+    ContradictionCapability, ContradictionDetector, DEFAULT_MAX_AUDITS,
+};
 use crate::agents::math_presentation::{extract_math_verdict, MathIntentClassifier};
 use crate::agents::runtime::{run_agent, AgentError, AgentOutput, AgentRun, AgentTool};
 use crate::agents::structured::StructuredAgent;
 use crate::agents::whole_doc_reader::{WholeDocReaderCapability, DEFAULT_MAX_READS};
-use crate::agents::chunked_reasoner::{ChunkedReasoner, ChunkedReasonerError};
-use crate::agents::contradiction::detector::DetectorError;
-use crate::agents::chunked_mapper::ChunkedMapperError;
 use crate::config::AppSettings;
 use crate::contracts::common::{
     format_conversation_history, format_file_names, AiFile, NeedIngestResponse, PdfContentType,
     SupportedCapability, ToolOperationStep,
 };
+use crate::contracts::ledger::Verdict;
 use crate::contracts::orchestrator::OrchestratorRequest;
 use crate::contracts::pdf_edit::EditPlanPayload;
 use crate::contracts::pdf_questions::{
     PdfQuestionAnswerPayload, PdfQuestionOrchestrateResponse, PdfQuestionRequest,
     PdfQuestionResponse, PdfQuestionTerminalResponse,
 };
-use crate::contracts::ledger::Verdict;
 use crate::documents::rag_capability::RagCapability;
 use crate::documents::service::DocumentService;
 use crate::llm::client::LlmClient;
@@ -41,7 +43,8 @@ use crate::models::ToolId;
 use crate::services::language::language_directive;
 use crate::services::tracking::require_current_user_id;
 
-const PDF_QUESTION_SYSTEM_PROMPT: &str = "You answer questions about PDF documents using three retrieval tools:\n\
+const PDF_QUESTION_SYSTEM_PROMPT: &str =
+    "You answer questions about PDF documents using three retrieval tools:\n\
 \n\
 1. search_knowledge(query) - returns the passages most semantically similar \
 to the query. Use it for targeted lookups: a specific fact, a named section, \
@@ -78,7 +81,8 @@ implementation details.\n\
 'I couldn't find that information in the document.'\n\
 - Do not make it sound like you're choosing not to answer.";
 
-const MATH_SYNTH_SYSTEM_PROMPT: &str = "You are given a math-audit Verdict (structured JSON) and the user's \
+const MATH_SYNTH_SYSTEM_PROMPT: &str =
+    "You are given a math-audit Verdict (structured JSON) and the user's \
 original question. Answer the question in plain prose using only \
 facts from the Verdict; do not invent figures or pages. \
 Reply in the SAME LANGUAGE as the user's question. Keep the answer \
@@ -239,11 +243,7 @@ impl PdfQuestionAgent {
         let principals = vec![user_id];
         let mut missing = Vec::new();
         for file in files {
-            if !self
-                .documents
-                .has_collection(&file.id, &principals)
-                .await?
-            {
+            if !self.documents.has_collection(&file.id, &principals).await? {
                 missing.push(file.clone());
             }
         }

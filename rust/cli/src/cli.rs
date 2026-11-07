@@ -150,6 +150,15 @@ pub enum EnginesCmd {
     Validate,
     /// Detailed machine-readable engine report.
     Report,
+    /// Install a missing engine through the platform package manager.
+    /// Always prints the command and asks before running it.
+    Install {
+        /// Engine name (e.g. ghostscript, tesseract, qpdf).
+        engine: String,
+        /// Run the package-manager command without prompting.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]

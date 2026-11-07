@@ -14,13 +14,42 @@ use crate::handlers::jobs::AppState;
 use crate::handlers::merge::file_response;
 use crate::handlers::misc::BlankRasterizer;
 use crate::handlers::split::zip_response;
-use crate::image_split::{self, SplitParams, SplitResult};
+use crate::image_split::{self, SplitParams, SplitResult, MAX_IMAGE_PIXELS};
 use crate::pdfdoc;
 use crate::upload::{output_name, param, Upload, FILE_FIELD};
 
 /// Java's `SCAN_RENDER_DPI`; `ExtractImageScansController` renders at
 /// `Math.min(SCAN_RENDER_DPI, system.maxDPI)`.
 const SCAN_RENDER_DPI: u32 = 300;
+
+/// Each gs render is a subprocess (~100+ MB peak); each split holds
+/// per-pixel buffers. Batches bound both the process and memory fan-out.
+const RENDER_WORKERS: usize = 8;
+const SPLIT_WORKERS: usize = 4;
+
+/// Run `f` over `items` on at most `workers` threads per batch,
+/// preserving item order; a panicking task yields `None` for its slot.
+fn run_bounded<T, R, F>(items: &[T], workers: usize, f: F) -> Vec<Option<R>>
+where
+    F: Fn(&T) -> R + Sync,
+    T: Sync,
+    R: Send,
+{
+    let mut out = Vec::with_capacity(items.len());
+    for chunk in items.chunks(workers.max(1)) {
+        let results: Vec<Option<F::Output>> = std::thread::scope(|scope| {
+            chunk
+                .iter()
+                .map(|item| scope.spawn(|| f(item)))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|h| h.join().ok())
+                .collect()
+        });
+        out.extend(results);
+    }
+    out
+}
 
 /// `Math.min(SCAN_RENDER_DPI, system.maxDPI)` with Java's 500 default
 /// already in the settings field; clamped positive because a `maxDPI`
@@ -87,17 +116,15 @@ fn extract_image_scans(
     }
 
     let p = p.split();
-    // Splitting is pure CPU on disjoint images — fan out per page and
-    // flatten in page order so zip entries keep Java's page ordering.
-    let per_image: Vec<Vec<SplitResult>> = std::thread::scope(|scope| {
-        images
-            .iter()
-            .map(|image| scope.spawn(move || image_split::split_photos(image, "scan", p)))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|h| h.join().unwrap_or_default())
-            .collect()
-    });
+    // Splitting is pure CPU on disjoint images — fan out per page in
+    // bounded batches so a many-page PDF cannot spawn unbounded threads,
+    // and flatten in page order so zip entries keep Java's ordering.
+    let per_image: Vec<Vec<SplitResult>> = run_bounded(&images, SPLIT_WORKERS, |image| {
+        image_split::split_photos(image, "scan", p)
+    })
+    .into_iter()
+    .map(|r| r.unwrap_or_default())
+    .collect();
     let crops: Vec<Vec<u8>> = per_image
         .into_iter()
         .flatten()
@@ -138,6 +165,7 @@ fn input_images(upload: &Upload) -> AppResult<Vec<RgbImage>> {
         let dynamic = image::load_from_memory(&upload.bytes).map_err(|_| {
             AppError::BadRequest("The uploaded file is not a supported image format".into())
         })?;
+        check_pixel_budget(dynamic.width(), dynamic.height())?;
         return Ok(vec![dynamic.to_rgb8()]);
     }
 
@@ -150,28 +178,36 @@ fn input_images(upload: &Upload) -> AppResult<Vec<RgbImage>> {
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Ghostscript is required")))?;
     let rasterizer = &rasterizer;
     let dpi = scan_dpi();
-    // Each gs run writes its own `page-{n}-{dpi}.png`, so pages rasterise
-    // concurrently; joining in spawn order keeps page order.
-    let rasterizer = &rasterizer;
-    let rendered: Vec<Option<DynamicImage>> = std::thread::scope(|scope| {
-        let rasterizer = &rasterizer;
-        let handles: Vec<_> = (1..=page_count as u32)
-            .map(|page| scope.spawn(move || rasterizer.render(page, dpi)))
-            .collect();
-        handles
+    // Each gs run writes its own `page-{n}-{dpi}.png`; bounded batches
+    // keep a many-page PDF from forking unbounded subprocesses, and
+    // joining in spawn order keeps page order.
+    let pages: Vec<u32> = (1..=page_count as u32).collect();
+    let rendered: Vec<Option<DynamicImage>> =
+        run_bounded(&pages, RENDER_WORKERS, |&page| rasterizer.render(page, dpi))
             .into_iter()
-            .map(|h| h.join().unwrap_or(None))
-            .collect()
-    });
+            .map(|r| r.flatten())
+            .collect();
     rendered
         .into_iter()
         .enumerate()
         .map(|(i, image)| {
-            image
-                .map(|img| image_to_rgb(&img))
-                .ok_or_else(|| AppError::Pdf(format!("ghostscript failed on page {}", i + 1)))
+            let image = image
+                .ok_or_else(|| AppError::Pdf(format!("ghostscript failed on page {}", i + 1)))?;
+            check_pixel_budget(image.width(), image.height())?;
+            Ok(image_to_rgb(&image))
         })
         .collect()
+}
+
+/// Reject images whose decode would exceed the splitter's pixel budget —
+/// checked before the multi-buffer pipeline allocates per-pixel scratch.
+fn check_pixel_budget(width: u32, height: u32) -> AppResult<()> {
+    if width as u64 * height as u64 > MAX_IMAGE_PIXELS {
+        return Err(AppError::BadRequest(
+            "image exceeds the maximum supported size".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn image_to_rgb(image: &DynamicImage) -> RgbImage {
@@ -217,6 +253,31 @@ mod tests {
         let up = upload("scan.png", b"not an image");
         let err = input_images(&up).unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn run_bounded_preserves_order_and_swallows_panics() {
+        let items: Vec<u32> = (0..10).collect();
+        let out = run_bounded(&items, 3, |&n| {
+            if n == 4 {
+                panic!("boom");
+            }
+            n * 2
+        });
+        assert_eq!(out.len(), 10);
+        for (i, slot) in out.iter().enumerate() {
+            if i == 4 {
+                assert!(slot.is_none());
+            } else {
+                assert_eq!(*slot, Some(i as u32 * 2));
+            }
+        }
+    }
+
+    #[test]
+    fn pixel_budget_rejects_oversized() {
+        assert!(check_pixel_budget(10_000, 10_000).is_ok()); // exactly 100 MP
+        assert!(check_pixel_budget(10_001, 10_000).is_err());
     }
 
     #[test]

@@ -11,16 +11,13 @@ use rust_decimal::Decimal;
 use crate::contracts::ledger::{Discrepancy, DiscrepancyKind, Severity};
 
 struct FigureRecord {
-    /// Normalised label (the ledger key).
-    label: String,
     value: Decimal,
     page: i64,
     raw: String,
 }
 
 // Strip punctuation that varies between contexts ("revenue:" vs "revenue —")
-static LABEL_NOISE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[:\-—\s]+").unwrap());
+static LABEL_NOISE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[:\-—\s]+").unwrap());
 
 fn normalise_label(label: &str) -> String {
     LABEL_NOISE
@@ -47,7 +44,6 @@ impl FigureTracker {
     pub fn record(&mut self, label: &str, value: Decimal, page: i64, raw: &str) {
         let key = normalise_label(label);
         let record = FigureRecord {
-            label: key.clone(),
             value,
             page,
             raw: raw.to_string(),

@@ -194,6 +194,15 @@ pub fn router(state: AppState) -> Router {
             post(security::remove_cert_sign),
         )
         .route("/api/v1/security/redact", post(security::redact))
+        .route("/api/v1/security/verify-pdf", post(security::verify_pdf))
+        .route(
+            "/api/v1/security/validate-compliance",
+            post(security::validate_compliance),
+        )
+        .route(
+            "/api/v1/security/validate-signature",
+            post(crate::signature::validate_signature),
+        )
         .route("/api/v1/security/auto-redact", post(security::auto_redact))
         .route(
             "/api/v1/security/redact-execute",

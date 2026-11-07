@@ -6,6 +6,7 @@
 pub mod arithmetic;
 pub mod figures;
 pub mod formula;
+mod parsing;
 
 pub use arithmetic::ArithmeticScanner;
 pub use figures::FigureTracker;

@@ -23,6 +23,9 @@ use crate::contracts::documents::Page;
 use crate::contracts::ProgressEvent;
 use crate::services::progress::emit_progress;
 
+type BuildPrompt = Arc<dyn Fn(&str, &str) -> String + Send + Sync>;
+type SummaryCounts<T> = Arc<dyn Fn(&T) -> (usize, usize) + Send + Sync>;
+
 /// Per-page marker rendered by [`ChunkedMapper::format_chunk_content`].
 /// Downstream extractor prompts reference this shape, so it lives here.
 pub const PAGE_MARKER_TEMPLATE: &str = "[Page {n}]";
@@ -80,8 +83,8 @@ pub struct ChunkedMapper<T> {
     agent: StructuredAgent,
     chars_per_slice: usize,
     worker_timeout: Duration,
-    build_prompt: Arc<dyn Fn(&str, &str) -> String + Send + Sync>,
-    summary_counts: Arc<dyn Fn(&T) -> (usize, usize) + Send + Sync>,
+    build_prompt: BuildPrompt,
+    summary_counts: SummaryCounts<T>,
     semaphore: Arc<Semaphore>,
     _t: PhantomData<fn() -> T>,
 }
@@ -99,8 +102,8 @@ where
         chars_per_slice: usize,
         concurrency: usize,
         worker_timeout: Duration,
-        build_prompt: Option<Arc<dyn Fn(&str, &str) -> String + Send + Sync>>,
-        summary_counts: Option<Arc<dyn Fn(&T) -> (usize, usize) + Send + Sync>>,
+        build_prompt: Option<BuildPrompt>,
+        summary_counts: Option<SummaryCounts<T>>,
     ) -> Result<Self, ChunkedMapperError> {
         if chars_per_slice == 0 {
             return Err(ChunkedMapperError::BadCharsPerSlice);

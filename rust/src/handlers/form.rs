@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use axum::extract::{Multipart, Query, State};
+use axum::extract::Multipart;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use lopdf::{decode_text_string, dictionary, Dictionary, Document, Object, ObjectId};
@@ -27,7 +27,6 @@ use serde_json::{json, Map, Value};
 use crate::error::{AppError, AppResult};
 use crate::handlers::jobs::AppState;
 use crate::handlers::merge::{file_response, pdf_response};
-use crate::handlers::misc::dispatch;
 use crate::pdfdoc;
 use crate::upload::Upload;
 
@@ -1341,122 +1340,131 @@ async fn receive_form_multipart(multipart: Multipart) -> AppResult<FormUpload> {
     })
 }
 
+/// `#[endpoint]` receiver for the form routes: the PDF arrives as `file`
+/// (not `fileInput`) and the optional `data`/`names`/`fields` file parts
+/// travel as named extras so the work fns keep the standard signature.
+async fn receive_form_parts(
+    multipart: Multipart,
+) -> AppResult<(Vec<Upload>, Vec<(String, Upload)>, Vec<(String, String)>)> {
+    let FormUpload {
+        file,
+        data,
+        names,
+        fields,
+        params,
+    } = receive_form_multipart(multipart).await?;
+    let mut extras = Vec::new();
+    if let Some(u) = data {
+        extras.push(("data".to_string(), u));
+    }
+    if let Some(u) = names {
+        extras.push(("names".to_string(), u));
+    }
+    if let Some(u) = fields {
+        extras.push(("fields".to_string(), u));
+    }
+    Ok((vec![file], extras, params))
+}
+
+/// The `data`/`names`/`fields` extra part by field name, if the request
+/// carried it as a file upload.
+fn extra<'a>(extras: &'a [(String, Upload)], field: &str) -> Option<&'a Upload> {
+    extras
+        .iter()
+        .find(|(name, _)| name == field)
+        .map(|(_, u)| u)
+}
+
 fn load_document(upload: &Upload) -> AppResult<Document> {
     pdfdoc::load(&upload.name, &upload.bytes)
 }
 
 /// `POST /api/v1/form/fields` → `{fields, template}`.
-pub async fn list_fields(
-    State(state): State<AppState>,
-    Query(query): Query<std::collections::HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint(receive = "receive_form_parts")]
+fn list_fields(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    _extras: Vec<(String, Upload)>,
+    _params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let FormUpload { file, .. } = receive_form_multipart(multipart).await?;
-    dispatch(
-        state,
-        query,
-        vec![file],
-        Vec::new(),
-        |_s, _q, uploads, _p| {
-            let upload = uploads.into_iter().next().unwrap();
-            let document = load_document(&upload)?;
-            let entries = extract_entries(&document, true)?;
-            let fields: Vec<Value> = entries
-                .iter()
-                .map(|e| serde_json::to_value(&e.info).unwrap_or(Value::Null))
-                .collect();
-            let rows: Vec<_> = entries.iter().map(|e| e.template_row.clone()).collect();
-            Ok(Json(json!({
-                "fields": fields,
-                "template": fill_template(&rows),
-            }))
-            .into_response())
-        },
-    )
-    .await
+    let upload = uploads.into_iter().next().unwrap();
+    let document = load_document(&upload)?;
+    let entries = extract_entries(&document, true)?;
+    let fields: Vec<Value> = entries
+        .iter()
+        .map(|e| serde_json::to_value(&e.info).unwrap_or(Value::Null))
+        .collect();
+    let rows: Vec<_> = entries.iter().map(|e| e.template_row.clone()).collect();
+    Ok(Json(json!({
+        "fields": fields,
+        "template": fill_template(&rows),
+    }))
+    .into_response())
 }
 
 /// `POST /api/v1/form/fields-with-coordinates` → field list with widget
 /// geometry in the embedpdf viewer's coordinate space.
-pub async fn list_fields_with_coordinates(
-    State(state): State<AppState>,
-    Query(query): Query<std::collections::HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint(receive = "receive_form_parts")]
+fn list_fields_with_coordinates(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    _extras: Vec<(String, Upload)>,
+    _params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let FormUpload { file, .. } = receive_form_multipart(multipart).await?;
-    dispatch(
-        state,
-        query,
-        vec![file],
-        Vec::new(),
-        |_s, _q, uploads, _p| {
-            let upload = uploads.into_iter().next().unwrap();
-            let document = load_document(&upload)?;
-            let mut entries = extract_entries(&document, false)?;
-            sort_coords_entries(&mut entries);
-            let json: Vec<Value> = entries
-                .iter()
-                .map(|e| serde_json::to_value(&e.coords).unwrap_or(Value::Null))
-                .collect();
-            Ok(Json(json).into_response())
-        },
-    )
-    .await
+    let upload = uploads.into_iter().next().unwrap();
+    let document = load_document(&upload)?;
+    let mut entries = extract_entries(&document, false)?;
+    sort_coords_entries(&mut entries);
+    let json: Vec<Value> = entries
+        .iter()
+        .map(|e| serde_json::to_value(&e.coords).unwrap_or(Value::Null))
+        .collect();
+    Ok(Json(json).into_response())
 }
 
 /// `POST /api/v1/form/extract-csv` → `name_extracted.csv`. A `data` part
 /// carries `Map<String,String>` fill values applied before extraction,
 /// matching the controller's pre-pass.
-pub async fn extract_csv(
-    State(state): State<AppState>,
-    Query(query): Query<std::collections::HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint(receive = "receive_form_parts")]
+fn extract_csv(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    extras: Vec<(String, Upload)>,
+    _params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let FormUpload { file, data, .. } = receive_form_multipart(multipart).await?;
-    dispatch(
-        state,
-        query,
-        vec![file],
-        Vec::new(),
-        move |_s, _q, uploads, _p| {
-            let mut upload = uploads.into_iter().next().unwrap();
-            let mut document = load_document(&upload)?;
-            apply_data_values(&mut document, data.as_ref(), false)?;
-            let entries = extract_entries(&document, true)?;
-            upload.name = csv_name(&upload.name);
-            Ok(file_response(csv_bytes(&entries), &upload.name, "text/csv"))
-        },
-    )
-    .await
+    let data = extra(&extras, "data");
+    let mut upload = uploads.into_iter().next().unwrap();
+    let mut document = load_document(&upload)?;
+    apply_data_values(&mut document, data, false)?;
+    let entries = extract_entries(&document, true)?;
+    upload.name = csv_name(&upload.name);
+    Ok(file_response(csv_bytes(&entries), &upload.name, "text/csv"))
 }
 
 /// `POST /api/v1/form/extract-xlsx` → `name_extracted.xlsx`, a minimal
 /// OOXML workbook equivalent to POI's two-column "Form Fields" sheet.
-pub async fn extract_xlsx(
-    State(state): State<AppState>,
-    Query(query): Query<std::collections::HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint(receive = "receive_form_parts")]
+fn extract_xlsx(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    extras: Vec<(String, Upload)>,
+    _params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let FormUpload { file, data, .. } = receive_form_multipart(multipart).await?;
-    dispatch(
-        state,
-        query,
-        vec![file],
-        Vec::new(),
-        move |_s, _q, uploads, _p| {
-            let mut upload = uploads.into_iter().next().unwrap();
-            let mut document = load_document(&upload)?;
-            apply_data_values(&mut document, data.as_ref(), false)?;
-            let entries = extract_entries(&document, true)?;
-            upload.name = xlsx_name(&upload.name);
-            Ok(file_response(
-                xlsx_bytes(&entries),
-                &upload.name,
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            ))
-        },
-    )
-    .await
+    let data = extra(&extras, "data");
+    let mut upload = uploads.into_iter().next().unwrap();
+    let mut document = load_document(&upload)?;
+    apply_data_values(&mut document, data, false)?;
+    let entries = extract_entries(&document, true)?;
+    upload.name = xlsx_name(&upload.name);
+    Ok(file_response(
+        xlsx_bytes(&entries),
+        &upload.name,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ))
 }
 
 fn xlsx_name(original: &str) -> String {
@@ -2896,54 +2904,43 @@ fn with_skipped_edits(mut response: Response, skipped: &[SkippedEdit]) -> Respon
 
 /// `POST /api/v1/form/fill` → `name_filled.pdf`; `flatten=true` merges
 /// the form afterwards.
-pub async fn fill_form(
-    State(state): State<AppState>,
-    Query(query): Query<std::collections::HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint(receive = "receive_form_parts")]
+fn fill_form(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    extras: Vec<(String, Upload)>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let FormUpload {
-        file, data, params, ..
-    } = receive_form_multipart(multipart).await?;
     let flatten = crate::upload::param_bool(&params, "flatten");
-    dispatch(
-        state,
-        query,
-        vec![file],
-        params,
-        move |_s, _q, uploads, _p| {
-            let upload = uploads.into_iter().next().unwrap();
-            let mut document = load_document(&upload)?;
-            let values = match data_text(data.as_ref())? {
-                Some(text) => parse_value_map(&text)?,
-                // Java treats an absent/empty `data` part as an empty map
-                // and still runs the strict applyFieldValues pass.
-                None => Vec::new(),
-            };
-            apply_field_values(&mut document, &values, flatten, true)?;
-            pdfdoc::touch_loaded_info(&mut document);
-            Ok(pdf_response(
-                pdfdoc::save(&mut document)?,
-                &pdf_filename(&upload.name, "filled"),
-            ))
-        },
-    )
-    .await
+    let data = extra(&extras, "data");
+    let upload = uploads.into_iter().next().unwrap();
+    let mut document = load_document(&upload)?;
+    let values = match data_text(data)? {
+        Some(text) => parse_value_map(&text)?,
+        // Java treats an absent/empty `data` part as an empty map
+        // and still runs the strict applyFieldValues pass.
+        None => Vec::new(),
+    };
+    apply_field_values(&mut document, &values, flatten, true)?;
+    pdfdoc::touch_loaded_info(&mut document);
+    Ok(pdf_response(
+        pdfdoc::save(&mut document)?,
+        &pdf_filename(&upload.name, "filled"),
+    ))
 }
 
 /// `POST /api/v1/form/delete-fields` → `name_updated.pdf` plus the
 /// skipped-edits headers when names did not resolve.
-pub async fn delete_fields_endpoint(
-    State(state): State<AppState>,
-    Query(query): Query<std::collections::HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint(receive = "receive_form_parts")]
+fn delete_fields_endpoint(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    extras: Vec<(String, Upload)>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let FormUpload {
-        file,
-        names,
-        params,
-        ..
-    } = receive_form_multipart(multipart).await?;
-    let names_text = match &names {
+    let names_text = match extra(&extras, "names") {
         Some(u) if !u.bytes.is_empty() => Some(String::from_utf8_lossy(&u.bytes).into_owned()),
         _ => params
             .iter()
@@ -2960,22 +2957,13 @@ pub async fn delete_fields_endpoint(
             "names payload must contain at least one value".into(),
         ));
     }
-    dispatch(
-        state,
-        query,
-        vec![file],
-        Vec::new(),
-        move |_s, _q, uploads, _p| {
-            let upload = uploads.into_iter().next().unwrap();
-            let mut document = load_document(&upload)?;
-            let skipped = delete_fields(&mut document, &name_list)?;
-            pdfdoc::touch_loaded_info(&mut document);
-            let bytes = pdfdoc::save(&mut document)?;
-            let response = pdf_response(bytes, &pdf_filename(&upload.name, "updated"));
-            Ok(with_skipped_edits(response, &skipped))
-        },
-    )
-    .await
+    let upload = uploads.into_iter().next().unwrap();
+    let mut document = load_document(&upload)?;
+    let skipped = delete_fields(&mut document, &name_list)?;
+    pdfdoc::touch_loaded_info(&mut document);
+    let bytes = pdfdoc::save(&mut document)?;
+    let response = pdf_response(bytes, &pdf_filename(&upload.name, "updated"));
+    Ok(with_skipped_edits(response, &skipped))
 }
 
 /// `buildBaseName`: simple filename, `.pdf` stripped, `_{suffix}` added;
@@ -4658,18 +4646,15 @@ fn field_bundle(pdf_bytes: &[u8], fields_json: &[u8]) -> AppResult<Vec<u8>> {
 }
 
 /// `POST /api/v1/form/add-fields` → `name_updated.pdf`.
-pub async fn add_fields_endpoint(
-    State(state): State<AppState>,
-    Query(query): Query<std::collections::HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint(receive = "receive_form_parts")]
+fn add_fields_endpoint(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    extras: Vec<(String, Upload)>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let FormUpload {
-        file,
-        fields,
-        params,
-        ..
-    } = receive_form_multipart(multipart).await?;
-    let text = part_text(fields.as_ref(), &params, "fields").unwrap_or_default();
+    let text = part_text(extra(&extras, "fields"), &params, "fields").unwrap_or_default();
     let definitions = parse_definitions(&text)?;
     if definitions.is_empty() {
         return Err(AppError::BadRequest(
@@ -4677,40 +4662,29 @@ pub async fn add_fields_endpoint(
         ));
     }
     require_usable_names(&definitions, &[])?;
-    dispatch(
-        state,
-        query,
-        vec![file],
-        Vec::new(),
-        move |_s, _q, uploads, _p| {
-            let upload = uploads.into_iter().next().unwrap();
-            let mut document = load_document(&upload)?;
-            let skipped = add_fields_work(&mut document, &definitions)?;
-            pdfdoc::touch_loaded_info(&mut document);
-            let bytes = pdfdoc::save(&mut document)?;
-            let response = pdf_response(bytes, &pdf_filename(&upload.name, "updated"));
-            Ok(with_skipped_edits(response, &skipped))
-        },
-    )
-    .await
+    let upload = uploads.into_iter().next().unwrap();
+    let mut document = load_document(&upload)?;
+    let skipped = add_fields_work(&mut document, &definitions)?;
+    pdfdoc::touch_loaded_info(&mut document);
+    let bytes = pdfdoc::save(&mut document)?;
+    let response = pdf_response(bytes, &pdf_filename(&upload.name, "updated"));
+    Ok(with_skipped_edits(response, &skipped))
 }
 
 /// `POST /api/v1/form/modify-fields` → `name_updated.pdf`.
-pub async fn modify_fields_endpoint(
-    State(state): State<AppState>,
-    Query(query): Query<std::collections::HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint(receive = "receive_form_parts")]
+fn modify_fields_endpoint(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    extras: Vec<(String, Upload)>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let FormUpload {
-        file,
-        fields,
-        params,
-        ..
-    } = receive_form_multipart(multipart).await?;
     // Java binds this part as `updates`; accept `fields` too so both
     // spellings of the JSON part work.
-    let text = part_text(fields.as_ref(), &params, "updates")
-        .or_else(|| part_text(fields.as_ref(), &params, "fields"))
+    let fields = extra(&extras, "fields");
+    let text = part_text(fields, &params, "updates")
+        .or_else(|| part_text(fields, &params, "fields"))
         .unwrap_or_default();
     let modifications = parse_definitions(&text)?;
     if modifications.is_empty() {
@@ -4719,39 +4693,27 @@ pub async fn modify_fields_endpoint(
         ));
     }
     require_usable_names(&[], &modifications)?;
-    dispatch(
-        state,
-        query,
-        vec![file],
-        Vec::new(),
-        move |_s, _q, uploads, _p| {
-            let upload = uploads.into_iter().next().unwrap();
-            let mut document = load_document(&upload)?;
-            let skipped = modify_fields_work(&mut document, &modifications)?;
-            pdfdoc::touch_loaded_info(&mut document);
-            let bytes = pdfdoc::save(&mut document)?;
-            let response = pdf_response(bytes, &pdf_filename(&upload.name, "updated"));
-            Ok(with_skipped_edits(response, &skipped))
-        },
-    )
-    .await
+    let upload = uploads.into_iter().next().unwrap();
+    let mut document = load_document(&upload)?;
+    let skipped = modify_fields_work(&mut document, &modifications)?;
+    pdfdoc::touch_loaded_info(&mut document);
+    let bytes = pdfdoc::save(&mut document)?;
+    let response = pdf_response(bytes, &pdf_filename(&upload.name, "updated"));
+    Ok(with_skipped_edits(response, &skipped))
 }
 
 /// `POST /api/v1/form/edit-fields` → `name_updated.pdf`, or the
 /// fields.json+document.pdf ZIP bundle when `includeFields=true`.
-pub async fn edit_fields_endpoint(
-    State(state): State<AppState>,
-    Query(query): Query<std::collections::HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint(receive = "receive_form_parts")]
+fn edit_fields_endpoint(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    extras: Vec<(String, Upload)>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let FormUpload {
-        file,
-        fields,
-        params,
-        ..
-    } = receive_form_multipart(multipart).await?;
     let include_fields = crate::upload::param_bool(&params, "includeFields");
-    let text = part_text(fields.as_ref(), &params, "edits").unwrap_or_default();
+    let text = part_text(extra(&extras, "fields"), &params, "edits").unwrap_or_default();
     let batch: FieldEditBatch = serde_json::from_str(&text)
         .map_err(|e| AppError::BadRequest(format!("invalid edits payload JSON: {e}")))?;
     let delete_names = match &batch.delete {
@@ -4764,39 +4726,30 @@ pub async fn edit_fields_endpoint(
         ));
     }
     require_usable_names(&batch.add, &batch.modify)?;
-    dispatch(
-        state,
-        query,
-        vec![file],
-        Vec::new(),
-        move |_s, _q, uploads, _p| {
-            let mut upload = uploads.into_iter().next().unwrap();
-            let mut document = load_document(&upload)?;
-            let mut batch = batch;
-            batch.delete = Some(json!(delete_names));
-            let skipped = apply_field_edits_work(&mut document, &batch)?;
-            pdfdoc::touch_loaded_info(&mut document);
-            let bytes = pdfdoc::save(&mut document)?;
-            if include_fields {
-                let mut entries = extract_entries(&document, false)?;
-                sort_coords_entries(&mut entries);
-                let fields_json = serde_json::to_vec(
-                    &entries
-                        .iter()
-                        .map(|e| serde_json::to_value(&e.coords).unwrap_or(Value::Null))
-                        .collect::<Vec<_>>(),
-                )
-                .unwrap_or_default();
-                let bundle = field_bundle(&bytes, &fields_json)?;
-                upload.name = bundle_name(&upload.name);
-                let response = file_response(bundle, &upload.name, "application/zip");
-                return Ok(with_skipped_edits(response, &skipped));
-            }
-            let response = pdf_response(bytes, &pdf_filename(&upload.name, "updated"));
-            Ok(with_skipped_edits(response, &skipped))
-        },
-    )
-    .await
+    let mut upload = uploads.into_iter().next().unwrap();
+    let mut document = load_document(&upload)?;
+    let mut batch = batch;
+    batch.delete = Some(json!(delete_names));
+    let skipped = apply_field_edits_work(&mut document, &batch)?;
+    pdfdoc::touch_loaded_info(&mut document);
+    let bytes = pdfdoc::save(&mut document)?;
+    if include_fields {
+        let mut entries = extract_entries(&document, false)?;
+        sort_coords_entries(&mut entries);
+        let fields_json = serde_json::to_vec(
+            &entries
+                .iter()
+                .map(|e| serde_json::to_value(&e.coords).unwrap_or(Value::Null))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_default();
+        let bundle = field_bundle(&bytes, &fields_json)?;
+        upload.name = bundle_name(&upload.name);
+        let response = file_response(bundle, &upload.name, "application/zip");
+        return Ok(with_skipped_edits(response, &skipped));
+    }
+    let response = pdf_response(bytes, &pdf_filename(&upload.name, "updated"));
+    Ok(with_skipped_edits(response, &skipped))
 }
 
 fn bundle_name(original: &str) -> String {

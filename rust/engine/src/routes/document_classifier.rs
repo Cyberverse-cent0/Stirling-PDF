@@ -21,7 +21,8 @@ async fn classify_document(
     State(state): State<AppState>,
     Json(request): Json<ClassifyDocumentRequest>,
 ) -> ApiResult<Json<DocumentClassificationResponse>> {
-    let provider = state.settings.chat_provider.clone();
-    let response = document_classifier::classify(&state.fast_model, &provider, &request).await?;
+    let runtime = state.runtime.load();
+    let provider = runtime.settings.chat_provider.clone();
+    let response = document_classifier::classify(&runtime.fast_model, &provider, &request).await?;
     Ok(Json(response))
 }

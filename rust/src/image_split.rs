@@ -38,10 +38,33 @@ pub struct SplitResult {
 
 const MIN_AREA: i64 = 10000;
 const MIN_CONTOUR_AREA: i64 = 500;
+/// Hard pixel ceiling: below it the pipeline's per-pixel buffers stay in
+/// the hundreds-of-MB range per image; above it a crafted upload could
+/// exhaust memory. Checked in `split_photos` and again by the HTTP layer
+/// before decode work starts.
+pub const MAX_IMAGE_PIXELS: u64 = 100_000_000;
+/// `borderSize` is user input; anything past this is meaningless on a
+/// scan and only inflates the bordered copy.
+const MAX_BORDER_SIZE: i32 = 4096;
+/// Deskew runs Canny + Hough + a bicubic warp — ~20 bytes per pixel of
+/// scratch. Past this the crop is returned unrotated rather than risking
+/// memory exhaustion on huge photos.
+const MAX_DESKEW_PIXELS: u64 = 48_000_000;
+/// Moore tracing is capped so a pathological component cannot allocate
+/// an unbounded boundary vector; past the budget the component's pixel
+/// count stands in for contour area (equal for solid blobs, which is
+/// what the 500 px² threshold cares about).
+const MAX_TRACE_STEPS: usize = 1 << 22;
+
 /// Runs the whole pipeline on a decoded RGB image.
 pub fn split_photos(image: &RgbImage, input_base: &str, p: SplitParams) -> Vec<SplitResult> {
+    let (w, h) = image.dimensions();
+    if w == 0 || h == 0 || w as u64 * h as u64 > MAX_IMAGE_PIXELS {
+        return Vec::new();
+    }
+    let border = p.border_size.clamp(0, MAX_BORDER_SIZE) as u32;
     let bg = estimate_background_color(image);
-    let bordered = add_border(image, bg, p.border_size.max(0) as u32);
+    let bordered = add_border(image, bg, border);
     let mut boundaries = find_photo_boundaries(&bordered, bg, p.tolerance);
     boundaries.sort_by_key(|b| (b.y, b.x));
 
@@ -49,13 +72,15 @@ pub fn split_photos(image: &RgbImage, input_base: &str, p: SplitParams) -> Vec<S
     for (idx, b) in boundaries.iter().enumerate() {
         let mut crop = imageops::crop_imm(&bordered, b.x, b.y, b.w, b.h).to_image();
         crop = auto_rotate(&crop, p.angle_threshold);
-        if p.border_size > 0
-            && crop.height() > 2 * p.border_size as u32
-            && crop.width() > 2 * p.border_size as u32
-        {
-            let bs = p.border_size as u32;
-            crop = imageops::crop_imm(&crop, bs, bs, crop.width() - 2 * bs, crop.height() - 2 * bs)
-                .to_image();
+        if border > 0 && crop.height() > 2 * border && crop.width() > 2 * border {
+            crop = imageops::crop_imm(
+                &crop,
+                border,
+                border,
+                crop.width() - 2 * border,
+                crop.height() - 2 * border,
+            )
+            .to_image();
         }
         if crop.width() == 0 || crop.height() == 0 {
             continue;
@@ -105,7 +130,9 @@ fn estimate_background_color(image: &RgbImage) -> Rgb<u8> {
 
 fn add_border(image: &RgbImage, color: Rgb<u8>, size: u32) -> RgbImage {
     let (w, h) = image.dimensions();
-    let mut out = RgbImage::from_pixel(w + 2 * size, h + 2 * size, color);
+    let nw = w.saturating_add(2 * size);
+    let nh = h.saturating_add(2 * size);
+    let mut out = RgbImage::from_pixel(nw, nh, color);
     imageops::overlay(&mut out, image, size as i64, size as i64);
     out
 }
@@ -184,13 +211,14 @@ fn find_photo_boundaries(image: &RgbImage, bg: Rgb<u8>, tolerance: i32) -> Vec<B
     }
 
     let mut out = Vec::new();
-    for (min_x, min_y, max_x, max_y, _px) in stats.values() {
+    for (min_x, min_y, max_x, max_y, px) in stats.values() {
         let bw = max_x - min_x + 1;
         let bh = max_y - min_y + 1;
         if (bw as i64) * (bh as i64) < MIN_AREA {
             continue;
         }
-        let contour_area = component_contour_area(&labels, w, h, *min_x, *min_y, *max_x, *max_y);
+        let contour_area =
+            component_contour_area(&labels, w, h, (*min_x, *min_y, *max_x, *max_y), *px);
         if contour_area >= MIN_CONTOUR_AREA {
             out.push(Boundary {
                 x: *min_x,
@@ -258,11 +286,10 @@ fn component_contour_area(
     labels: &[u32],
     w: u32,
     h: u32,
-    min_x: u32,
-    min_y: u32,
-    max_x: u32,
-    max_y: u32,
+    bbox: (u32, u32, u32, u32),
+    px_count: i64,
 ) -> i64 {
+    let (min_x, min_y, max_x, max_y) = bbox;
     // Find the component's root label inside its bbox.
     let mut root = 0u32;
     'outer: for y in min_y..=max_y {
@@ -305,7 +332,8 @@ fn component_contour_area(
     let mut dir = 6usize; // entered from the west (index of (0,1) backtrack)
     let start = (cx, cy);
     let mut steps = 0usize;
-    let max_steps = ((max_x - min_x + 2) * (max_y - min_y + 2)) as usize;
+    let trace_limit = ((max_x - min_x + 2) * (max_y - min_y + 2)) as usize;
+    let trace_limit = trace_limit.min(MAX_TRACE_STEPS);
     loop {
         boundary.push((cx, cy));
         // Search clockwise from backtrack+1 for the next component pixel.
@@ -330,8 +358,11 @@ fn component_contour_area(
             break;
         }
         steps += 1;
-        if steps > max_steps {
-            break;
+        if steps > trace_limit {
+            // Pathological perimeter (e.g. a comb-shaped component):
+            // pixel count approximates contour area closely enough for
+            // the MIN_CONTOUR_AREA threshold and bounds the allocation.
+            return px_count;
         }
     }
 
@@ -351,6 +382,9 @@ fn component_contour_area(
 // ---------------------------------------------------------------------------
 
 fn auto_rotate(image: &RgbImage, angle_threshold: i32) -> RgbImage {
+    if !within_deskew_budget(image.width(), image.height()) {
+        return image.clone();
+    }
     let gray = to_gray(image);
     let edges = canny(&gray, 50, 150);
     let Some(angle) = hough_median_angle(&edges) else {
@@ -360,6 +394,10 @@ fn auto_rotate(image: &RgbImage, angle_threshold: i32) -> RgbImage {
         return image.clone();
     }
     rotate_replicate(image, angle)
+}
+
+fn within_deskew_budget(w: u32, h: u32) -> bool {
+    w as u64 * h as u64 <= MAX_DESKEW_PIXELS
 }
 
 fn to_gray(image: &RgbImage) -> GrayImage {
@@ -479,7 +517,8 @@ fn canny(gray: &GrayImage, low: u8, high: u8) -> GrayImage {
 /// returns the median of `theta·180/π − 90` over detected lines.
 fn hough_median_angle(edges: &GrayImage) -> Option<f64> {
     let (w, h) = edges.dimensions();
-    let diag = ((w * w + h * h) as f64).sqrt();
+    // u64 math: w*w overflows u32 for images wider than 65535 px.
+    let diag = ((w as u64 * w as u64 + h as u64 * h as u64) as f64).sqrt();
     let rho_max = diag.ceil() as i32;
     let n_rho = (2 * rho_max + 1) as usize;
     let mut acc = vec![0u32; n_rho * 180];
@@ -598,5 +637,65 @@ fn cubic_weight(t: f64) -> f64 {
         -0.5 * t * t * t + 2.5 * t * t - 4.0 * t + 2.0
     } else {
         0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params() -> SplitParams {
+        SplitParams {
+            tolerance: 30,
+            angle_threshold: 10,
+            border_size: 1,
+        }
+    }
+
+    /// A 0×0 image must not underflow the corner sampling.
+    #[test]
+    fn empty_image_returns_no_crops() {
+        let img = RgbImage::new(0, 0);
+        assert!(split_photos(&img, "x", params()).is_empty());
+    }
+
+    /// `borderSize` is unclamped user input — i32::MAX must not overflow
+    /// the bordered-copy dimensions or allocate unboundedly.
+    #[test]
+    fn absurd_border_size_is_clamped() {
+        let mut img = RgbImage::from_pixel(200, 200, Rgb([255, 255, 255]));
+        for x in 40..160 {
+            for y in 40..160 {
+                img.put_pixel(x, y, Rgb([20, 20, 20]));
+            }
+        }
+        let p = SplitParams {
+            border_size: i32::MAX,
+            ..params()
+        };
+        let results = split_photos(&img, "x", p);
+        // The single photo is still found; the border is capped, not fatal.
+        assert_eq!(results.len(), 1);
+    }
+
+    /// w*w overflowed u32 for images wider than 65535 px — the Hough
+    /// diagonal must be computed in u64.
+    #[test]
+    fn hough_handles_images_wider_than_u16_range() {
+        let mut edges = GrayImage::new(70_000, 8);
+        for x in (0..70_000).step_by(97) {
+            edges.put_pixel(x, 4, image::Luma([255]));
+        }
+        // Must not panic; a sparse edge set may or may not cross threshold.
+        let _ = hough_median_angle(&edges);
+    }
+
+    /// The deskew budget boundary is inclusive and overflow-safe.
+    #[test]
+    fn deskew_budget_boundary() {
+        assert!(within_deskew_budget(8000, 6000)); // 48 MP exactly
+        assert!(!within_deskew_budget(8000, 6001));
+        // u64 math: the product must not wrap to a small in-budget value.
+        assert!(!within_deskew_budget(u32::MAX, u32::MAX));
     }
 }

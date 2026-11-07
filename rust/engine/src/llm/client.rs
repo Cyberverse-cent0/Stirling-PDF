@@ -164,6 +164,7 @@ impl LlmClient {
     }
 
     async fn post_anthropic(&self, body: &Value) -> Result<Value, LlmError> {
+        let started = std::time::Instant::now();
         let resp = self
             .http
             .post(self.anthropic_url())
@@ -172,7 +173,16 @@ impl LlmClient {
             .json(body)
             .send()
             .await?;
-        parse_response(resp).await
+        let value = parse_response(resp).await?;
+        crate::services::tracking::on_llm_response(
+            ProviderKind::Anthropic,
+            &self.spec.model_name,
+            &self.spec.base_url,
+            body,
+            &value,
+            started.elapsed(),
+        );
+        Ok(value)
     }
 
     // ---- OpenAI-compatible chat completions ----
@@ -211,6 +221,7 @@ impl LlmClient {
     }
 
     async fn post_openai(&self, body: &Value) -> Result<Value, LlmError> {
+        let started = std::time::Instant::now();
         let resp = self
             .http
             .post(self.openai_url())
@@ -218,7 +229,16 @@ impl LlmClient {
             .json(body)
             .send()
             .await?;
-        parse_response(resp).await
+        let value = parse_response(resp).await?;
+        crate::services::tracking::on_llm_response(
+            ProviderKind::OpenAiCompat,
+            &self.spec.model_name,
+            &self.spec.base_url,
+            body,
+            &value,
+            started.elapsed(),
+        );
+        Ok(value)
     }
 
     async fn openai_text(&self, system: &str, prompt: &str) -> Result<String, LlmError> {

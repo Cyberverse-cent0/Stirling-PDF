@@ -83,3 +83,68 @@ pub fn collect(root: &Path) -> Diagnostics {
         checks,
     }
 }
+
+/// OS/kernel identity plus tool versions for the diagnose bundle —
+/// the Rust-scoped counterpart of the shell script's system-info file.
+pub fn system_info() -> String {
+    let mut out = String::new();
+    if let Ok(release) = std::fs::read_to_string("/etc/os-release") {
+        out.push_str(&release);
+        out.push('\n');
+    }
+    if let Ok(uname) =
+        crate::services::process::run(std::path::Path::new("uname"), &["-a".to_string()], None)
+    {
+        out.push_str(&String::from_utf8_lossy(&uname.stdout));
+    }
+    for (label, exe, arg) in [
+        ("rustc", "rustc", "--version"),
+        ("cargo", "cargo", "--version"),
+        ("git", "git", "--version"),
+    ] {
+        if let Some(path) = find_executable(exe) {
+            if let Ok(o) = crate::services::process::run(&path, &[arg.to_string()], None) {
+                let text = String::from_utf8_lossy(&o.stdout);
+                out.push_str(&format!("{label}: {}\n", text.trim()));
+            }
+        }
+    }
+    for status in engine_detector::detect_all() {
+        let detail = match (&status.path, &status.version) {
+            (Some(p), Some(v)) => format!("{} ({})", p.display(), v),
+            (Some(p), None) => p.display().to_string(),
+            (None, _) => "not found".to_string(),
+        };
+        out.push_str(&format!("engine {}: {detail}\n", status.label));
+    }
+    out
+}
+
+/// Settings files can carry API keys and passwords; the bundle keeps the
+/// structure but blanks values on sensitive-looking keys.
+pub fn redact_settings(text: &str) -> String {
+    const SENSITIVE: &[&str] = &[
+        "key",
+        "secret",
+        "password",
+        "passwd",
+        "token",
+        "apikey",
+        "api_key",
+        "credential",
+    ];
+    text.lines()
+        .map(|line| {
+            let lower = line.to_lowercase();
+            if SENSITIVE.iter().any(|s| lower.contains(s)) {
+                match line.split_once(':') {
+                    Some((key, _)) => format!("{key}: ***"),
+                    None => line.to_string(),
+                }
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}

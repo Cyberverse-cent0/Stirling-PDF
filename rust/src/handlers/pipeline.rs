@@ -936,6 +936,17 @@ mod tests {
         }
     }
 
+    /// `platform::BOUND_ADDR` is process-global, so tests that repoint it at
+    /// their stub must not run concurrently — a sibling's dispatch would hit
+    /// this test's listener (or a dead one) and flake.
+    static ADDR_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn bound_stub() -> tokio::sync::MutexGuard<'static, ()> {
+        let guard = ADDR_LOCK.lock().await;
+        platform::note_bound_addr(stub_pipeline_server());
+        guard
+    }
+
     /// A one-endpoint stand-in for the Rust server: returns a fixed file with
     /// a Content-Disposition name so `dispatch` has something to unpack.
     fn stub_pipeline_server() -> std::net::SocketAddr {
@@ -989,8 +1000,7 @@ mod tests {
 
     #[tokio::test]
     async fn single_step_returns_the_step_file() {
-        let addr = stub_pipeline_server();
-        platform::note_bound_addr(addr);
+        let _guard = bound_stub().await;
         let cfg = config(&[("/api/v1/general/merge-pdfs", serde_json::json!({}))]);
         let response = run_pipeline(vec![upload("a.pdf", b"pdf")], cfg)
             .await
@@ -1006,8 +1016,7 @@ mod tests {
 
     #[tokio::test]
     async fn filter_empty_body_drops_the_file() {
-        let addr = stub_pipeline_server();
-        platform::note_bound_addr(addr);
+        let _guard = bound_stub().await;
         let cfg = config(&[
             ("/api/v1/filter/filter-page-count", serde_json::json!({})),
             ("/api/v1/general/merge-pdfs", serde_json::json!({})),
@@ -1023,8 +1032,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_outputs_zip_with_dedup_names() {
-        let addr = stub_pipeline_server();
-        platform::note_bound_addr(addr);
+        let _guard = bound_stub().await;
         // One single-input step over two uploads yields two same-named files.
         let cfg = config(&[("/api/v1/general/split-pages", serde_json::json!({}))]);
         let response = run_pipeline(vec![upload("a.pdf", b"pdf"), upload("b.pdf", b"pdf")], cfg)
@@ -1045,8 +1053,7 @@ mod tests {
 
     #[tokio::test]
     async fn step_and_file_limits_are_enforced() {
-        let addr = stub_pipeline_server();
-        platform::note_bound_addr(addr);
+        let _guard = bound_stub().await;
         let ops = |n: usize| PipelineConfig {
             name: None,
             operations: Some(

@@ -15,10 +15,8 @@ use super::parsing::{strip_chars, to_decimal};
 // digits with optional thousands separator and decimal point.
 const NUM: &str = r"[£$€¥]?-?[\d,]+(?:\.\d+)?";
 
-static EQUALS_EXPR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(&format!(r"({NUM}(?:\s*[+\-]\s*{NUM})+)\s*=\s*({NUM})"))
-        .unwrap()
-});
+static EQUALS_EXPR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(&format!(r"({NUM}(?:\s*[+\-]\s*{NUM})+)\s*=\s*({NUM})")).unwrap());
 
 static TOTAL_THEN_ADDENDS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
@@ -36,7 +34,7 @@ fn eval_expression(expr: &str) -> Option<Decimal> {
     let mut result = Decimal::ZERO;
     let mut operator = '+';
     let mut number = String::new();
-    let mut flush = |number: &mut String, operator: char, result: &mut Decimal| -> Option<()> {
+    let flush = |number: &mut String, operator: char, result: &mut Decimal| -> Option<()> {
         if number.is_empty() {
             return Some(());
         }

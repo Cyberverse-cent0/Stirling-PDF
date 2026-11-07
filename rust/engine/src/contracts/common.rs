@@ -212,6 +212,10 @@ pub enum OrchestratorResponse {
     NeedContent(NeedContentResponse),
     #[serde(rename = "need_ingest")]
     NeedIngest(NeedIngestResponse),
+    #[serde(rename = "need_clarification")]
+    NeedClarification(crate::contracts::pdf_edit::EditClarificationPayload),
+    #[serde(rename = "cannot_do")]
+    CannotDo(crate::contracts::pdf_edit::EditCannotDoPayload),
     #[serde(rename = "answer")]
     Answer(crate::contracts::pdf_questions::PdfQuestionAnswerPayload),
     #[serde(rename = "not_found")]

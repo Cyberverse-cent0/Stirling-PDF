@@ -44,6 +44,10 @@ pub struct AgentTool {
     /// every model round trip; hidden tools are neither advertised nor
     /// dispatchable.
     pub visible: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// `ToolOutput` semantics: calling this tool ends the run — its handler
+    /// result must be a JSON document that becomes [`AgentOutput::Json`]
+    /// verbatim (the orchestrator's delegate tools work this way).
+    pub terminal: bool,
 }
 
 impl AgentTool {
@@ -58,7 +62,15 @@ impl AgentTool {
             parameters,
             handler: Arc::new(move |args, ctx| Box::pin(handler(args.clone(), ctx))),
             visible: None,
+            terminal: false,
         }
+    }
+
+    /// Mark the tool as run-terminal (`ToolOutput`): its JSON result becomes
+    /// the agent output instead of being fed back to the model.
+    pub fn terminal(mut self) -> Self {
+        self.terminal = true;
+        self
     }
 
     /// Hide the tool from the model once `f` returns false (budget spent).
@@ -163,6 +175,20 @@ pub async fn run_agent(run: AgentRun<'_>) -> Result<AgentOutput, AgentError> {
                 return Ok(AgentOutput::Json(call.arguments.clone()));
             }
             let tool = tools.iter().find(|t| t.name == call.name);
+            if let Some(tool) = tool.filter(|t| t.terminal) {
+                // ToolOutput path: the delegate's result IS the agent
+                // output — no further model round trip.
+                let content = (tool.handler)(call.arguments.clone(), &ToolContext::default())
+                    .await
+                    .map_err(|e| AgentError::Tool(call.name.clone(), e))?;
+                let value: Value = serde_json::from_str(&content).map_err(|e| {
+                    AgentError::Output(format!(
+                        "terminal tool {} returned non-JSON output: {e}",
+                        call.name
+                    ))
+                })?;
+                return Ok(AgentOutput::Json(value));
+            }
             let content = match tool {
                 Some(tool) => {
                     match (tool.handler)(call.arguments.clone(), &ToolContext::default()).await {

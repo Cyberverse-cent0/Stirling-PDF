@@ -65,6 +65,39 @@ pub fn remove_pid(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
+/// Sorted relative-path listing of `dir` for diagnostic bundles, capped
+/// at `max` entries so a huge tree cannot flood the report.
+pub fn dir_tree(dir: &Path, max: usize) -> String {
+    let mut lines = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let rel = path
+                .strip_prefix(dir)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            if path.is_dir() {
+                lines.push(format!("{rel}/"));
+                stack.push(path);
+            } else {
+                lines.push(rel);
+            }
+            if lines.len() >= max {
+                lines.push("... (truncated)".to_string());
+                lines.sort();
+                return lines.join("\n");
+            }
+        }
+    }
+    lines.sort();
+    lines.join("\n")
+}
+
 /// Last `lines` lines of `path`, newest last.
 pub fn tail(path: &Path, lines: usize) -> anyhow::Result<String> {
     let content = std::fs::read_to_string(path)

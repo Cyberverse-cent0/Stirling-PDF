@@ -327,13 +327,17 @@ compileTestJava` on all modules after each pass.
   proprietary/saas `@AutoJobPostMapping` endpoints still create jobs in
   the Java job store, so the controller must stay until those modules
   are migrated or job ownership is unified.
-- [ ] ~96 unreachable bean classes flagged by the sweep (servlet
-  filters, listeners, `*RepositoryCustomImpl`, DI impls such as
-  `AttachmentService`, `PortfolioService`, `ReplaceAndInvertColor*`,
-  `FingerprintBasedSessionFilter`, `MetricsFilter`, MCP `Stirling*Tool`s)
-  — need a DI-aware review (interface injection, servlet-container
-  registration, Spring Data naming convention) before deletion; do not
-  bulk-delete on name-reachability alone.
+- [x] ~96 unreachable bean classes flagged by the sweep — resolved via
+  `migration/reports/BEAN-REACHABILITY-AUDIT.md` (name-absence scan →
+  22 candidates → DI-stereotype review). The 12 confirmed dead files
+  were deleted 2026-11-07 (10 unused `annotations/api/*Api` composed
+  annotations, commented-out `FingerprintBasedSessionFilter`, orphaned
+  `AutoRotateAnalysisResult`); `:common` + `:stirling-pdf`
+  compileJava/compileTestJava verified clean. The 10 live stereotype
+  beans stay. Phase-2 transitive DI-graph pass (2026-11-07) found and
+  deleted 18 more dead OSS files + 26 dedicated tests; the 8
+  proprietary hits were Spring-Data `*RepositoryCustomImpl` false
+  positives. See the audit's Phase-2 section.
 - [ ] Remaining Java-only API surface after the above: security crypto
   family (P5 — `CertSign`, `HardwareSigning`, `Timestamp`,
   `ValidateSignature`, `VerifyPDF`, `ValidateCompliance`,
@@ -393,16 +397,33 @@ Audit: `migration/reports/desktop-phase-b-endpoint-audit.md`.
   endpoints degrade via `ENGINE_PROBES` group probes. Dead registry keys
   and frontend-composed tools deliberately left enabled (parity + they
   work through routed calls).
-- [ ] Phase C — engine bundling: decide per-platform which of
-  `gs`/`qpdf`/`pdftohtml`/`rsvg-convert`/`inkscape`/unrar-family/
-  `tesseract`+`ocrmypdf` ship in the installer; `weasyprint`/`soffice`/
-  `ebook-convert` likely stay off (group probes already degrade).
-- [ ] Phase D — installer slimming: drop `libs/*.jar` +
-  `runtime/jre/**` from `tauri.conf.json` resources and the
-  `BackendKind::Java` fallback once the Rust path is proven on all
-  desktop OSes (~100 MB+ per installer). Requires a real
-  `tauri build` smoke test first — `cargo check` does not cover
-  `externalBin` resource resolution.
+- [x] Phase C — engine bundling: `stage-engines` (build-tools) stages
+  the Tier-1 set (`gs`, `qpdf`, `pdftohtml`, `rsvg-convert`, `inkscape`,
+  unrar-family, `7z`, `rar`) from the build host's PATH into
+  `src-tauri/engines/` — Linux `ldd` closure into `engines/lib`,
+  macOS `otool`/`install_name_tool`/`codesign`, Ghostscript
+  `Resource/` share tree, dev mirror to `binaries/engines`. The shell
+  exports `LD_LIBRARY_PATH`/`DYLD_FALLBACK_LIBRARY_PATH`/`GS_LIB` to
+  the sidecar; `STIRLING_ENGINES_DIR` + `<exe>/engines` resolution in
+  `convert.rs` finds them, and `endpointconfig` probes light up the
+  matching tool groups. Missing engines warn and degrade via probes.
+  Interpreter/dir engines (`weasyprint`, `soffice`, `ebook-convert`,
+  `ocrmypdf`, `verapdf`) stay PATH-only by design; Windows has no
+  package source so engines resolve from PATH there.
+- [~] Phase D — installer slimming: `tauri.backend-rust.conf.json`
+  (default) replaces `bundle.resources` with `engines/**/*` only —
+  `libs/*.jar` + `runtime/jre/**` are no longer bundled on the Rust
+  path; `tauri.backend-java.conf.json` restores them and drops
+  `externalBin`. `prepare` builds jlink only when
+  `DESKTOP_BACKEND=java`, otherwise rust-server + engines; every
+  `tauri dev`/`build` invocation passes the matching `--config`.
+  Linux `.deb` smoke test passed: `usr/bin/stirling-server` +
+  `engines/` (gs/7z/pdftohtml/unar + lib closure + gs share) bundled,
+  zero jar/JRE entries (~94 MB package). The test caught a real bug —
+  `find_rust_server` didn't probe the executable's own directory,
+  where Tauri puts sidecars on every platform; fixed. Still open:
+  macOS/Windows installer builds, then deleting the
+  `BackendKind::Java` fallback and jlink tasks entirely.
 
 ## Explicitly out of scope (do not touch)
 

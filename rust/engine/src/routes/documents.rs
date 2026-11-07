@@ -26,8 +26,8 @@ async fn ingest_document(
     RequiredUserId(_user_id): RequiredUserId,
     Json(request): Json<IngestDocumentRequest>,
 ) -> ApiResult<Json<IngestDocumentResponse>> {
-    let chunks_indexed = state
-        .documents
+    let documents = state.runtime.load().documents.clone();
+    let chunks_indexed = documents
         .ingest(
             &request.document_id,
             request.page_text.as_deref().unwrap_or(&[]),
@@ -50,15 +50,10 @@ async fn delete_document(
     Path(document_id): Path<String>,
 ) -> ApiResult<Json<DeleteDocumentResponse>> {
     let principals = vec![user_id.clone()];
-    let existed = state
-        .documents
-        .has_collection(&document_id, &principals)
-        .await?;
+    let documents = state.runtime.load().documents.clone();
+    let existed = documents.has_collection(&document_id, &principals).await?;
     if existed {
-        state
-            .documents
-            .delete_collection(&document_id, &user_id)
-            .await?;
+        documents.delete_collection(&document_id, &user_id).await?;
     }
     Ok(Json(DeleteDocumentResponse {
         document_id,
@@ -72,7 +67,7 @@ async fn purge_caller_documents(
     State(state): State<AppState>,
     RequiredUserId(user_id): RequiredUserId,
 ) -> ApiResult<Json<PurgeOwnerResponse>> {
-    let deleted = state.documents.purge_owner(&user_id).await?;
+    let deleted = state.runtime.load().documents.purge_owner(&user_id).await?;
     tracing::info!(deleted, owner = %user_id, "Purged caller document collections");
     Ok(Json(PurgeOwnerResponse {
         owner_id: user_id,

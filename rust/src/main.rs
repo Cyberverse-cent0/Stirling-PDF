@@ -22,11 +22,13 @@ mod pdfdoc;
 mod pdftext;
 mod pipeline_table;
 mod settings;
+mod signature;
 mod tabula;
 #[cfg(test)]
 mod testkit;
 mod text;
 mod upload;
+mod verapdf;
 mod web;
 
 use axum::http::Method;
@@ -67,6 +69,20 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
+
+    // Bundled engine payloads keep their shared-library closure in
+    // <engines>/lib; children inherit LD_LIBRARY_PATH so gs/qpdf resolve
+    // libgs & friends without system installs. Prepend: a user-set path
+    // still applies after the bundled dir.
+    if let Some(lib) = convert::engines_lib_dir() {
+        let mut paths = vec![lib];
+        if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        if let Ok(joined) = std::env::join_paths(paths) {
+            std::env::set_var("LD_LIBRARY_PATH", joined);
+        }
+    }
 
     let config = config::Config::from_env()?;
     upload::configure_max_part_bytes(config.max_upload_bytes);

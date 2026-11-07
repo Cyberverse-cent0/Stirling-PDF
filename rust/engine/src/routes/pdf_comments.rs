@@ -18,7 +18,8 @@ async fn generate(
     State(state): State<AppState>,
     Json(request): Json<PdfCommentRequest>,
 ) -> ApiResult<Json<PdfCommentResponse>> {
-    let provider = state.settings.chat_provider.clone();
-    let response = pdf_comment::generate(&state.fast_model, &provider, &request).await?;
+    let runtime = state.runtime.load();
+    let provider = runtime.settings.chat_provider.clone();
+    let response = pdf_comment::generate(&runtime.fast_model, &provider, &request).await?;
     Ok(Json(response))
 }

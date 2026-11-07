@@ -13,7 +13,7 @@ pub fn router() -> Router<AppState> {
 async fn healthcheck(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
-        smart_model: state.settings.smart_model_name.clone(),
-        fast_model: state.settings.fast_model_name.clone(),
+        smart_model: state.runtime.load().settings.smart_model_name.clone(),
+        fast_model: state.runtime.load().settings.fast_model_name.clone(),
     })
 }

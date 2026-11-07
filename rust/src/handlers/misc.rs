@@ -3,60 +3,17 @@
 
 use std::collections::{HashMap, HashSet};
 
-use axum::extract::{Multipart, Query, State};
 use axum::response::{IntoResponse, Response};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 
 use crate::error::{AppError, AppResult};
-use crate::handlers::jobs;
 use crate::handlers::jobs::AppState;
 use crate::handlers::merge::{file_response, pdf_response};
 use crate::page_select;
 use crate::pdfdoc;
 use crate::upload::{
-    output_name, param, param_bool, receive_files_multipart, receive_multipart, remove_extension,
-    simple_name, Upload, FILE_FIELD,
+    output_name, param, param_bool, remove_extension, simple_name, Upload, FILE_FIELD,
 };
-
-/// Shared tail of a migrated endpoint: `?async=true` goes through the job
-/// framework, everything else runs inline on the blocking pool — the same
-/// contract the `#[endpoint]` macro generates. Handlers that must inspect
-/// params before deciding (e.g. rejecting an unported mode) use this
-/// instead of the macro.
-pub(crate) async fn dispatch<F>(
-    state: AppState,
-    query: HashMap<String, String>,
-    uploads: Vec<Upload>,
-    params: Vec<(String, String)>,
-    work: F,
-) -> AppResult<Response>
-where
-    F: FnOnce(
-            AppState,
-            HashMap<String, String>,
-            Vec<Upload>,
-            Vec<(String, String)>,
-        ) -> AppResult<Response>
-        + Send
-        + 'static,
-{
-    if jobs::async_requested(&query, &params) {
-        let work_state = state.clone();
-        return jobs::submit(&state, async move {
-            tokio::task::spawn_blocking(move || {
-                work(work_state, query, uploads, params).map(IntoResponse::into_response)
-            })
-            .await
-            .map_err(|e| AppError::Internal(anyhow::Error::new(e)))?
-        })
-        .await;
-    }
-    tokio::task::spawn_blocking(move || {
-        work(state, query, uploads, params).map(IntoResponse::into_response)
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::Error::new(e)))?
-}
 
 /// Multipart field names that are request plumbing, not custom metadata.
 const METADATA_RESERVED: &[&str] = &[
@@ -329,26 +286,18 @@ fn decompress_pdf(
 /// rasterises every page and rebuilds the document image-only; that mode
 /// has no native implementation, so it is rejected rather than
 /// approximated.
-pub async fn flatten(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
-) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
-    if param_bool(&params, "flattenOnlyForms") {
-        return dispatch(state, query, uploads, params, flatten_work).await;
-    }
-    Err(AppError::BadRequest(
-        "flatten without flattenOnlyForms rasterises every page, which the Rust backend does not implement".into(),
-    ))
-}
-
-fn flatten_work(
+#[stirling_macros::endpoint]
+fn flatten(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
-    _params: Vec<(String, String)>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
+    if !param_bool(&params, "flattenOnlyForms") {
+        return Err(AppError::BadRequest(
+            "flatten without flattenOnlyForms rasterises every page, which the Rust backend does not implement".into(),
+        ));
+    }
     let Some(upload) = uploads.into_iter().next() else {
         return Err(AppError::BadRequest(format!("{FILE_FIELD} is required")));
     };
@@ -472,12 +421,13 @@ fn flatten_raster_work(
 /// (JPX/CCITT/JBIG2, Indexed/ICCBased colour spaces, `/Decode`, soft
 /// masks) are rejected — silently dropping them from the ZIP would be
 /// worse than a clear error.
-pub async fn extract_images(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint]
+fn extract_images(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
     let format = param(&params, "format", "png");
     // Java accepts any ImageIO-writable name; the `image` crate's codec
     // set is the faithful subset — anything else gets the same failure
@@ -500,15 +450,6 @@ pub async fn extract_images(
             )));
         }
     }
-    dispatch(state, query, uploads, params, extract_images_work).await
-}
-
-fn extract_images_work(
-    _state: AppState,
-    _query: HashMap<String, String>,
-    uploads: Vec<Upload>,
-    params: Vec<(String, String)>,
-) -> AppResult<Response> {
     let Some(upload) = uploads.into_iter().next() else {
         return Err(AppError::BadRequest(format!("{FILE_FIELD} is required")));
     };
@@ -524,18 +465,19 @@ fn extract_images_work(
 /// `POST /api/v1/misc/compress-pdf` — qpdf/Ghostscript sidecars plus the
 /// lopdf image-recompression pass. `lineArt=true` needs the proprietary
 /// ImageMagick line-art service, which has no Rust port.
-pub async fn compress_pdf(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint]
+fn compress_pdf(
+    state: AppState,
+    query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
     if param_bool(&params, "lineArt") {
         return Err(AppError::BadRequest(
             "compress-pdf lineArt=true needs the ImageMagick line-art service, which the Rust backend does not implement".into(),
         ));
     }
-    dispatch(state, query, uploads, params, compress_pdf_work).await
+    compress_pdf_impl(state, query, uploads, params)
 }
 
 fn last_param<'a>(params: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -655,7 +597,7 @@ fn gs_critical(output: &str) -> bool {
         || lower.contains("eps files may not contain multiple pages")
 }
 
-fn compress_pdf_work(
+fn compress_pdf_impl(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
@@ -1075,24 +1017,22 @@ fn delete_attachment(
 /// `POST /api/v1/misc/add-attachments` — the base PDF arrives as `fileInput`,
 /// the files to embed as repeated `attachments` parts. `convertToPdfA3b=true`
 /// is rejected: the PDF/A-3b pass would drop the embedded files.
-pub async fn add_attachments(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint(files = "attachments")]
+fn add_attachments(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    extras: Vec<(String, Upload)>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, extras, params) =
-        crate::upload::receive_files_multipart(multipart, &["attachments"]).await?;
     let pdfa = param_bool(&params, "convertToPdfA3b");
-    dispatch(state, query, uploads, params, move |_st, _q, u, p| {
-        maybe_pdfa_response(add_attachments_work(u, extras)?, &p, pdfa)
-    })
-    .await
+    maybe_pdfa_response(add_attachments_impl(uploads, extras)?, &params, pdfa)
 }
 
 const MAX_ATTACHMENT: usize = 50 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENTS: usize = 200 * 1024 * 1024;
 
-fn add_attachments_work(
+fn add_attachments_impl(
     uploads: Vec<Upload>,
     extras: Vec<(String, Upload)>,
 ) -> AppResult<(Vec<u8>, String)> {
@@ -1146,21 +1086,23 @@ struct BatchRename {
 /// `POST /api/v1/misc/batch-process-attachments` — deletions, renames and
 /// additions in one pass. `convertToPdfA3b=true` is rejected for the same
 /// reason as `add-attachments`.
-pub async fn batch_process_attachments(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint(files = "attachments")]
+fn batch_process_attachments(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    extras: Vec<(String, Upload)>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, extras, params) =
-        crate::upload::receive_files_multipart(multipart, &["attachments"]).await?;
     let pdfa = param_bool(&params, "convertToPdfA3b");
-    dispatch(state, query, uploads, params, move |_st, _q, u, p| {
-        maybe_pdfa_response(batch_process_attachments_work(u, extras, &p)?, &p, pdfa)
-    })
-    .await
+    maybe_pdfa_response(
+        batch_process_attachments_impl(uploads, extras, &params)?,
+        &params,
+        pdfa,
+    )
 }
 
-fn batch_process_attachments_work(
+fn batch_process_attachments_impl(
     uploads: Vec<Upload>,
     extras: Vec<(String, Upload)>,
     params: &[(String, String)],
@@ -1306,20 +1248,18 @@ fn flatten_portfolio(
 /// new PDF: one A4 cover page plus every file embedded under the catalog's
 /// `/Names /EmbeddedFiles` tree and a `/Collection` dictionary. No Java
 /// fallback is needed; every input is a plain byte embed.
-pub async fn create_portfolio(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint(files = "files")]
+fn create_portfolio(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    _uploads: Vec<Upload>,
+    extras: Vec<(String, Upload)>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, extras, params) =
-        crate::upload::receive_files_multipart(multipart, &["files"]).await?;
-    dispatch(state, query, uploads, params, move |_st, _q, _u, p| {
-        create_portfolio_work(extras, p)
-    })
-    .await
+    create_portfolio_impl(extras, params)
 }
 
-fn create_portfolio_work(
+fn create_portfolio_impl(
     extras: Vec<(String, Upload)>,
     params: Vec<(String, String)>,
 ) -> AppResult<Response> {
@@ -2287,22 +2227,23 @@ fn push_content_stream(doc: &mut Document, page_id: ObjectId, ops: &str) -> AppR
 /// (full inversion, custom/high-contrast recolouring) need a renderer
 /// and text layout the Rust backend does not have, so they are
 /// rejected.
-pub async fn replace_invert_pdf(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint]
+fn replace_invert_pdf(
+    state: AppState,
+    query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
     let mode = param(&params, "replaceAndInvertOption", "");
     if mode != "COLOR_SPACE_CONVERSION" {
         return Err(AppError::BadRequest(format!(
             "replaceAndInvertOption '{mode}' is not supported; only COLOR_SPACE_CONVERSION is implemented"
         )));
     }
-    dispatch(state, query, uploads, params, replace_invert_cmyk_work).await
+    replace_invert_cmyk_impl(state, query, uploads, params)
 }
 
-fn replace_invert_cmyk_work(
+fn replace_invert_cmyk_impl(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
@@ -2352,13 +2293,15 @@ fn replace_invert_cmyk_work(
 /// `POST /api/v1/misc/add-image` — overlays a raster image at PDF
 /// user-space (x, y) on the first page or every page. Anything the
 /// `image` crate cannot decode (SVG, …) is rejected.
-pub async fn add_image(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint(files = "imageFile")]
+fn add_image(
+    state: AppState,
+    query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    extras: Vec<(String, Upload)>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, extras, params) = receive_files_multipart(multipart, &["imageFile"]).await?;
-    // The first `imageFile` part decides raster support; `add_image_work`
+    // The first `imageFile` part decides raster support; `add_image_impl`
     // decodes through the `image` crate, so every format it knows
     // converts natively.
     let first_image = extras
@@ -2376,31 +2319,10 @@ pub async fn add_image(
     let Some((_, image)) = extras.find(|(field, _)| field == "imageFile") else {
         return Err(AppError::BadRequest("imageFile is required".into()));
     };
-    let work = move |state: AppState,
-                     query: HashMap<String, String>,
-                     uploads: Vec<Upload>,
-                     params: Vec<(String, String)>| {
-        add_image_work(state, query, uploads, params, image)
-    };
-    if jobs::async_requested(&query, &params) {
-        let work_state = state.clone();
-        return jobs::submit(&state, async move {
-            tokio::task::spawn_blocking(move || {
-                work(work_state, query, uploads, params).map(IntoResponse::into_response)
-            })
-            .await
-            .map_err(|e| AppError::Internal(anyhow::Error::new(e)))?
-        })
-        .await;
-    }
-    tokio::task::spawn_blocking(move || {
-        work(state, query, uploads, params).map(IntoResponse::into_response)
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::Error::new(e)))?
+    add_image_impl(state, query, uploads, params, image)
 }
 
-fn add_image_work(
+fn add_image_impl(
     _state: AppState,
     _query: HashMap<String, String>,
     uploads: Vec<Upload>,
@@ -2579,12 +2501,13 @@ fn upsert_xobject(resources: &mut Dictionary, name: &str, image_id: ObjectId) {
 /// from a JSON spec list. Specs carrying `anchorText` need PDF text
 /// location, which is not implemented; coordinate-only specs run
 /// natively.
-pub async fn add_comments(
-    State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
-    multipart: Multipart,
+#[stirling_macros::endpoint]
+fn add_comments(
+    _state: AppState,
+    _query: HashMap<String, String>,
+    uploads: Vec<Upload>,
+    params: Vec<(String, String)>,
 ) -> AppResult<Response> {
-    let (uploads, params) = receive_multipart(multipart).await?;
     let comments_raw = params
         .iter()
         .rev()
@@ -2606,15 +2529,6 @@ pub async fn add_comments(
             "comments specs with anchorText are not supported".into(),
         ));
     }
-    dispatch(state, query, uploads, params, add_comments_work).await
-}
-
-fn add_comments_work(
-    _state: AppState,
-    _query: HashMap<String, String>,
-    uploads: Vec<Upload>,
-    params: Vec<(String, String)>,
-) -> AppResult<Response> {
     let Some(upload) = uploads.into_iter().next() else {
         return Err(AppError::BadRequest(format!("{FILE_FIELD} is required")));
     };
@@ -3270,7 +3184,8 @@ mod tests {
                 content_type: None,
             },
         )];
-        let response = create_portfolio_work(extras, vec![]).unwrap();
+        let response =
+            create_portfolio_work(state(), HashMap::new(), vec![], extras, vec![]).unwrap();
         let doc = response_document(response).await;
         let catalog = catalog_dict(&doc);
         let collection = catalog.get(b"Collection").unwrap();
@@ -3292,7 +3207,8 @@ mod tests {
                 content_type: None,
             },
         )];
-        let portfolio = create_portfolio_work(extras, vec![]).unwrap();
+        let portfolio =
+            create_portfolio_work(state(), HashMap::new(), vec![], extras, vec![]).unwrap();
         let bytes = response_bytes(portfolio).await;
 
         let response = flatten_portfolio_work(
@@ -3340,8 +3256,8 @@ mod tests {
             state(),
             HashMap::new(),
             upload("doc.pdf", bytes),
+            vec![("imageFile".to_string(), image_upload)],
             params(&[("x", "10"), ("y", "20")]),
-            image_upload,
         )
         .unwrap();
         let doc = response_document(response).await;

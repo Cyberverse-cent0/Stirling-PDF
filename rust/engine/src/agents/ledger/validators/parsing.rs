@@ -7,9 +7,7 @@ use rust_decimal::Decimal;
 /// the `STRIP_PATTERN` sub in Python.
 pub(crate) fn strip_chars(raw: &str) -> String {
     raw.chars()
-        .filter(|c| {
-            !matches!(c, '£' | '$' | '€' | '¥' | ',') && !c.is_whitespace()
-        })
+        .filter(|c| !matches!(c, '£' | '$' | '€' | '¥' | ',') && !c.is_whitespace())
         .collect()
 }
 

@@ -20,8 +20,7 @@ static LHS_CELL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"cell\(\s*(\d+)\s*,\s*(\d+)\s*\)").unwrap());
 static SAFE_EVAL_TOKENS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\d+(?:\.\d+)?|[+\-*/]").unwrap());
-static COL_REF_PLAIN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"col(\d+)").unwrap());
+static COL_REF_PLAIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"col(\d+)").unwrap());
 
 pub struct FormulaEvaluator {
     tolerance: Decimal,
@@ -51,22 +50,12 @@ impl FormulaEvaluator {
         }
         match scope {
             "each_row" => self.check_each_row(page, &rows, formula, description, row_range),
-            "column_total" => self.check_column_total(
-                page,
-                &rows,
-                formula,
-                description,
-                target_row,
-                target_col,
-            ),
-            "single_cell" => self.check_single_cell(
-                page,
-                &rows,
-                formula,
-                description,
-                target_row,
-                target_col,
-            ),
+            "column_total" => {
+                self.check_column_total(page, &rows, formula, description, target_row, target_col)
+            }
+            "single_cell" => {
+                self.check_single_cell(page, &rows, formula, description, target_row, target_col)
+            }
             _ => {
                 tracing::warn!("[formula] unknown scope {scope:?}, skipping");
                 Vec::new()
@@ -99,11 +88,17 @@ impl FormulaEvaluator {
         };
 
         for row_idx in check_rows {
-            let row_idx_usize = row_idx as usize;
-            if row_idx < 0 || row_idx_usize >= rows.len() {
+            // Python indexes rows[row_idx] directly — negatives wrap from
+            // the end; out-of-range positives are skipped by the guard.
+            let row_idx = if row_idx < 0 {
+                rows.len() as i64 + row_idx
+            } else {
+                row_idx
+            };
+            if row_idx < 0 || row_idx as usize >= rows.len() {
                 continue;
             }
-            let row = &rows[row_idx_usize];
+            let row = &rows[row_idx as usize];
             let Some(stated) = Self::get_cell(row, lhs_col) else {
                 continue;
             };
@@ -141,10 +136,16 @@ impl FormulaEvaluator {
         let Some(target_row) = target_row else {
             return discrepancies;
         };
-        if target_row < 0 || target_row as usize >= rows.len() {
+        // Python `rows[target_row]` — negatives index from the end.
+        let total_idx = if target_row < 0 {
+            rows.len() as i64 + target_row
+        } else {
+            target_row
+        };
+        if total_idx < 0 || total_idx as usize >= rows.len() {
             return discrepancies;
         }
-        let total_row = &rows[target_row as usize];
+        let total_row = &rows[total_idx as usize];
 
         // Which columns to check: explicit target_col, else every column of
         // the total row.
@@ -216,11 +217,17 @@ impl FormulaEvaluator {
                 (r, c)
             }
         };
-        if target_row < 0 || target_col < 0 || target_row as usize >= rows.len() {
+        // Python `rows[target_row]` — negatives index from the end.
+        let row_idx = if target_row < 0 {
+            rows.len() as i64 + target_row
+        } else {
+            target_row
+        };
+        if row_idx < 0 || row_idx as usize >= rows.len() {
             return Vec::new();
         }
 
-        let row = &rows[target_row as usize];
+        let row = &rows[row_idx as usize];
         let Some(stated) = Self::get_cell(row, target_col) else {
             return Vec::new();
         };
@@ -243,7 +250,12 @@ impl FormulaEvaluator {
 
     /// Evaluate an expression in the context of a specific row: `colN` refs,
     /// `cell(r,c)` refs, `sum(colN, start-end)`, `+ - * /`.
-    fn eval_row_expr(&self, expr: &str, row: &[String], all_rows: &[Vec<String>]) -> Option<Decimal> {
+    fn eval_row_expr(
+        &self,
+        expr: &str,
+        row: &[String],
+        all_rows: &[Vec<String>],
+    ) -> Option<Decimal> {
         let mut resolved = expr.to_string();
 
         // sum(colN, start-end) — resolved against all_rows.
@@ -367,9 +379,12 @@ impl FormulaEvaluator {
         // Pass 2: + and -.
         let mut result = values[0];
         for (j, op) in ops.iter().enumerate() {
+            // Malformed token streams (e.g. a leading '+') leave ops longer
+            // than values-1; Python surfaces this as IndexError → None.
+            let &rhs = values.get(j + 1)?;
             match op {
-                '+' => result += values[j + 1],
-                '-' => result -= values[j + 1],
+                '+' => result += rhs,
+                '-' => result -= rhs,
                 _ => {}
             }
         }
@@ -385,10 +400,16 @@ impl FormulaEvaluator {
         m.as_str()[3..].parse().ok()
     }
 
+    /// Python `_get_cell`: `col >= len(row)` → None, otherwise `row[col]`
+    /// (negative cols index from the end).
     fn get_cell(row: &[String], col: i64) -> Option<Decimal> {
-        if col < 0 || col as usize >= row.len() {
+        if col >= row.len() as i64 {
             return None;
         }
-        to_decimal(&row[col as usize])
+        let idx = if col < 0 { row.len() as i64 + col } else { col };
+        if idx < 0 {
+            return None;
+        }
+        to_decimal(&row[idx as usize])
     }
 }

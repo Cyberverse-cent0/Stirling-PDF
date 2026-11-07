@@ -220,7 +220,13 @@ impl PdfEditAgent {
         let mut planned = None;
         for _attempt in 0..2 {
             let selection = self
-                .select_plan(request, &supported, &unavailable, allow_need_content, &repair_note)
+                .select_plan(
+                    request,
+                    &supported,
+                    &unavailable,
+                    allow_need_content,
+                    &repair_note,
+                )
                 .await?;
             tracing::info!("[pdf-edit] selection -> {}", selection.outcome_name());
             match selection {
@@ -684,12 +690,10 @@ mod tests {
     #[test]
     fn chain_problems_flags_a_report_into_a_file_step() {
         // accessibility-report produces JSON (a report); merge-pdfs needs PDF.
-        let problems = chain_problems(&[
-            ToolEndpoint::AccessibilityReport,
-            ToolEndpoint::MergePdfs,
-        ]);
+        let problems =
+            chain_problems(&[ToolEndpoint::AccessibilityReport, ToolEndpoint::MergePdfs]);
         assert!(problems.contains("step 2"), "{problems}");
-        assert!(problems.contains("ACCESSIBILITY_REPORT"), "{problems}");
+        assert!(problems.contains("MERGE_PDFS"), "{problems}");
     }
 
     #[test]
@@ -730,9 +734,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("    fileNames: ")
-                || text.contains("    fileNames\n")
-                || text.contains("    fileNames"),
+            text.contains("    generateToc: ") || text.contains("    generateToc\n"),
             "{text}"
         );
     }
