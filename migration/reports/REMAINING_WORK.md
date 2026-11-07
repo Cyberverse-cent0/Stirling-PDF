@@ -328,6 +328,20 @@ compileTestJava` on all modules after each pass.
   everything else. `AppState` no longer carries a backend; all
   `forward_*` call sites were deleted with it (unsupported modes return
   `BadRequest`).
+- [x] `JobController` parity fixes (2026-11-07): `cancel_job` now
+  returns Java's `{message, wasQueued, queuePosition}` body with the
+  400-on-completed branch (was a bespoke `{cancelled:true}` shape), and
+  `cleanup_jobs` reports a real `filesDeleted` count (was echoing
+  `jobsRemoved`). Ownership checks remain proprietary-scoped per the
+  item below.
+- [x] `web.rs` ReactRoutingController residual fixes (2026-11-07):
+  `/` + `/index.html` are now intercepted before static resolution so
+  they get context-path processing and the SaaS-landing swap (the raw
+  file previously shadowed the route); the SaaS landing is scoped to
+  root only like Java's `serveRootPage`; `/auth/callback` and
+  `/share/{token}` serve the plain shell ahead of prerendered lookup;
+  `/mobile-scanner`/`/mobile-sign` return `index.html` outside Tauri
+  mode; page responses send `no-cache, must-revalidate`.
 - [ ] Platform/web endpoints still Java-only: `JobController` +
   `JobOwnershipCache` — every route is registered in Rust, but
   proprietary/saas `@AutoJobPostMapping` endpoints still create jobs in
@@ -344,15 +358,20 @@ compileTestJava` on all modules after each pass.
   deleted 18 more dead OSS files + 26 dedicated tests; the 8
   proprietary hits were Spring-Data `*RepositoryCustomImpl` false
   positives. See the audit's Phase-2 section.
-- [ ] Remaining Java-only API surface after the above: security crypto
-  family (P5 — `CertSign`, `HardwareSigning`, `Timestamp`,
-  `ValidateSignature`, `VerifyPDF`, `ValidateCompliance`,
-  `PasswordController::restore-pdf-protection`) and all of
-  proprietary/saas. `RedactController::auto-redact`/`redact-execute`
+- [x] Security crypto family — now native (2026-11-07): `signature.rs`
+  (validate-signature incl. document timestamps + RSA-PSS params),
+  `timestamp.rs` (RFC 3161 timestamp-pdf), `verapdf.rs`
+  (validate-compliance), `pdfua.rs` (accessibility-report), and
+  `passwords.rs::restore_pdf_protection` (JPDFium-equivalent
+  re-encryption carrying source /R, /P, key length — verified by
+  reload-and-compare). `RedactController::auto-redact`/`redact-execute`
   are routed natively (`pdftext::redact` + overlay cover, matching
   Java's PDFBox fallback; `convertPDFToImage` rasterises through
   Ghostscript at 300 DPI like `PdfUtils.convertPdfToPdfImage`). The jpdfium markdown pipeline is fully ported in
   `rust/src/pdftext/` and serves `/convert/pdf/markdown`.
+  Still Java-only: `CertSign`/`HardwareSigning` (CMS/PKCS#7 signing —
+  `cert-sign` stays in `UNSUPPORTED_ENDPOINTS`) and all of
+  proprietary/saas.
 - [ ] Phase G build cleanup (only after F): `settings.gradle`,
   `app/*/build.gradle`, `buildSrc/`, `.taskfiles/backend.yml`,
   `runtime/docker/**`, Java jobs in `.github/workflows/*`.
@@ -416,20 +435,27 @@ Audit: `migration/reports/desktop-phase-b-endpoint-audit.md`.
   Interpreter/dir engines (`weasyprint`, `soffice`, `ebook-convert`,
   `ocrmypdf`, `verapdf`) stay PATH-only by design; Windows has no
   package source so engines resolve from PATH there.
-- [~] Phase D — installer slimming: `tauri.backend-rust.conf.json`
-  (default) replaces `bundle.resources` with `engines/**/*` only —
-  `libs/*.jar` + `runtime/jre/**` are no longer bundled on the Rust
-  path; `tauri.backend-java.conf.json` restores them and drops
-  `externalBin`. `prepare` builds jlink only when
-  `DESKTOP_BACKEND=java`, otherwise rust-server + engines; every
-  `tauri dev`/`build` invocation passes the matching `--config`.
-  Linux `.deb` smoke test passed: `usr/bin/stirling-server` +
-  `engines/` (gs/7z/pdftohtml/unar + lib closure + gs share) bundled,
-  zero jar/JRE entries (~94 MB package). The test caught a real bug —
-  `find_rust_server` didn't probe the executable's own directory,
-  where Tauri puts sidecars on every platform; fixed. Still open:
-  macOS/Windows installer builds, then deleting the
-  `BackendKind::Java` fallback and jlink tasks entirely.
+- [x] Phase D — installer slimming: the Java desktop backend is gone.
+  `tauri.conf.json` bundles `engines/**/*` only (no `libs/*.jar`,
+  no `runtime/jre/**`); `tauri.backend-{rust,java}.conf.json` and the
+  `DESKTOP_BACKEND` switch are deleted. `backend.rs` always spawns
+  `stirling-server` (`find_rust_server`, `STIRLING_SERVER_PATH` dev
+  override) — the `BackendKind` enum, JAR/JRE discovery, version-key
+  sorting, `run_stirling_pdf_jar`, and their tests are removed.
+  `desktop:prepare` unconditionally stages rust-server + engines;
+  `desktop:jlink*` tasks, `JLINK_MODULES`/`REQUIRED_JAVA`/`JPDFIUM_PLATFORMS`
+  vars, `stage-backend-jar`/`verify-bundled-jre` build-tools
+  subcommands, and the workflows' java-conditional steps and
+  `--config tauri.backend-*.conf.json` args are all removed.
+  Linux `.deb` smoke test passed earlier: `usr/bin/stirling-server` +
+  `engines/` bundled, zero jar/JRE entries (~94 MB package). Staged
+  sidecar verified live (`compress-pdf`, `convert/pdf/pdfa` → 200).
+  Dev-update e2e scripts ported off JAR/jlink to sidecar+engines
+  staging (`test-update-e2e.sh`, `build-dev-update.sh`);
+  `build-universal-mac-jre.sh` deleted (superseded by the `rust-server`
+  task's per-arch + `lipo` universal staging).
+  Still open: macOS/Windows installer builds (CI-only — cannot
+  cross-build Tauri bundles on Linux).
 
 ## Explicitly out of scope (do not touch)
 

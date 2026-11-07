@@ -18,13 +18,21 @@
     "createUpdaterArtifacts": true,
     "externalBin": ["binaries/stirling-server"],
     "publisher": "Stirling PDF Inc.",
-    "targets": ["deb", "rpm", "appimage", "dmg", "app", "msi"],
+    "targets": [
+      "deb",
+      "rpm",
+      "appimage",
+      "dmg",
+      "app",
+      "msi",
+      "nsis"
+    ],
     "icon": [
       "icons/windows/app.ico",
       "icons/macos/app.icns",
       "icons/macos/app-512.png"
     ],
-    "resources": ["libs/*.jar", "runtime/jre/**/*", "engines/**/*"],
+    "resources": ["engines/**/*"],
     "fileAssociations": [
       {
         "ext": ["pdf"],

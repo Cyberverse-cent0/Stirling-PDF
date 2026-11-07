@@ -86,10 +86,10 @@ jobs:
         id: set-matrix
         run: |
           # ARM64 uses NSIS because Tauri's WiX MSI bundler does not support it.
-          WINDOWS='{"platform":"windows-latest","args":"--target x86_64-pc-windows-msvc","name":"windows-x86_64","jpdfium_platforms":"windows-x64"}'
-          WINDOWS_ARM64='{"platform":"windows-11-arm","args":"--target aarch64-pc-windows-msvc --bundles nsis","name":"windows-arm64","jpdfium_platforms":"windows-arm64"}'
-          MACOS='{"platform":"macos-15","args":"--target universal-apple-darwin","name":"macos-universal","jpdfium_platforms":"darwin-arm64,darwin-x64"}'
-          LINUX='{"platform":"ubuntu-22.04","args":"","name":"linux-x86_64","jpdfium_platforms":"linux-x64"}'
+          WINDOWS='{"platform":"windows-latest","args":"--target x86_64-pc-windows-msvc","name":"windows-x86_64"}'
+          WINDOWS_ARM64='{"platform":"windows-11-arm","args":"--target aarch64-pc-windows-msvc --bundles nsis","name":"windows-arm64"}'
+          MACOS='{"platform":"macos-15","args":"--target universal-apple-darwin","name":"macos-universal"}'
+          LINUX='{"platform":"ubuntu-22.04","args":"","name":"linux-x86_64"}'
           ALL="$WINDOWS,$WINDOWS_ARM64,$MACOS,$LINUX"
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -237,43 +237,17 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.platform == 'macos-15' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
-      - name: Cache Gradle
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # Compiled dependency crates for the Tauri app and the stirling-server
+      # release build that desktop:prepare runs for the sidecar.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-tauri-releases-v1-${{ runner.os }}-${{ runner.arch }}-jdk-25-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle/libs.versions.toml', 'buildSrc/**', 'settings.gradle', 'build.gradle', 'app/**/build.gradle', 'gradle/**/*.gradle') }}
-
-      # x86_64 JDK is set up first so the aarch64 step below can leave its
-      # JAVA_HOME as the active one. The macOS universal JRE build needs
-      # jmods from both arches; the x64 path is captured into the env
-      # before the second local JDK setup overwrites JAVA_HOME.
-      - name: Set up x86_64 JDK 25 (macOS universal JRE)
-        if: matrix.platform == 'macos-15'
-        uses: ./.github/actions/java
-        with:
-          java-version: "25"
-          architecture: "x64"
-
-      - name: Capture x86_64 JAVA_HOME
-        if: matrix.platform == 'macos-15'
-        run: echo "X64_JAVA_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
-
-      - name: Set up JDK 25
-        if: matrix.platform != 'windows-11-arm'
-        uses: ./.github/actions/java
-        with:
-          java-version: "25"
-
-      # Windows ARM64 runners have no preinstalled JDK 25; Microsoft provides an ARM64 build.
-      - name: Set up JDK 25 (Windows ARM64)
-        if: matrix.platform == 'windows-11-arm'
-        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
-        with:
-          java-version: "25"
-          distribution: "microsoft"
-          architecture: "arm64"
+          workspaces: |
+            frontend/src-tauri
+            rust
+          shared-key: tauri-release-${{ matrix.name }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
 
       - name: Install Task
         uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
@@ -301,24 +275,16 @@ jobs:
         shell: pwsh
         run: choco install ghostscript qpdf 7zip unrar tesseract imagemagick -y --no-progress
 
-      # Build the universal JRE before desktop:prepare so the jlink:runtime
-      # task short-circuits on its `test -d runtime/jre` status check.
-      - name: Build universal macOS JRE
-        if: matrix.platform == 'macos-15' && vars.DESKTOP_BACKEND == 'java'
-        env:
-          AARCH64_JAVA_HOME: ${{ env.JAVA_HOME }}
-          JPDFIUM_PLATFORMS: ${{ matrix.jpdfium_platforms }}
-        run: task desktop:jlink:universal-mac
 
       - name: Prepare desktop build
-        env:
-          MAVEN_USER: ${{ secrets.MAVEN_USER }}
-          MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
-          MAVEN_PUBLIC_URL: ${{ secrets.MAVEN_PUBLIC_URL }}
-          DISABLE_ADDITIONAL_FEATURES: true
-          JPDFIUM_PLATFORMS: ${{ matrix.jpdfium_platforms }}
-          DESKTOP_BACKEND: ${{ vars.DESKTOP_BACKEND }}
         run: task desktop:prepare
+
+      # The bundle ships the stirling-server sidecar plus staged engines;
+      # a silent staging miss produces an app that cannot start its backend.
+      - name: Verify staged backend artifacts
+        run: |
+          ls frontend/src-tauri/binaries/stirling-server-*
+          test -f frontend/src-tauri/engines/.keep
 
       # DigiCert KeyLocker Setup (Cloud HSM)
       - name: Setup DigiCert KeyLocker
@@ -520,9 +486,9 @@ jobs:
         with:
           projectPath: ./frontend
           tauriScript: npx tauri
-          # backend-rust overlay: stirling-server sidecar + staged engines
-          # only, no JAR/JRE bundle (task desktop:engines staged them).
-          args: ${{ matrix.args }} --config src-tauri/tauri.backend-rust.conf.json
+          # stirling-server sidecar + staged engines only, no JAR/JRE
+          # bundle (task desktop:engines staged them).
+          args: ${{ matrix.args }}
 
       # Bundled libwayland conflicts with the host's on some distros (Fedora
       # Wayland: EGL_BAD_PARAMETER, blank window - #6878). Repack without it,
@@ -614,6 +580,19 @@ jobs:
           }
 
           $allSigned = $true
+
+          # x86_64 ships both an MSI and an NSIS setup exe; verify each
+          # outer installer. The inner stirling-pdf.exe is identical in both
+          # and is checked via the MSI extraction below.
+          $setupExes = Get-ChildItem -Path "./frontend/src-tauri/target" -Filter "*-setup.exe" -Recurse -File
+          foreach ($exe in $setupExes) {
+            $sig = Get-AuthenticodeSignature -FilePath $exe.FullName
+            Write-Host "NSIS installer: $($exe.Name) Status=$($sig.Status), Signer=$($sig.SignerCertificate.Subject)"
+            if ($sig.Status -ne "Valid") {
+              Write-Host "[ERROR] NSIS installer is not signed"
+              $allSigned = $false
+            }
+          }
 
           # Check MSI installer (outer wrapper - what users download)
           $msiFiles = Get-ChildItem -Path "./frontend/src-tauri/target" -Filter "*.msi" -Recurse -File
@@ -712,6 +691,10 @@ jobs:
           if [ "${{ matrix.platform }}" = "windows-latest" ]; then
             find . -name "*.msi" -exec cp {} "$DIST/Stirling-PDF-${{ matrix.name }}.msi" \;
             find . -name "*.msi.sig" -exec cp {} "$DIST/Stirling-PDF-${{ matrix.name }}.msi.sig" \;
+            # NSIS setup exe ships alongside the MSI; it is also its own
+            # updater payload (-> sibling .sig), same as the arm64 leg.
+            find . -name "*-setup.exe" -exec cp {} "$DIST/Stirling-PDF-${{ matrix.name }}-setup.exe" \;
+            find . -name "*-setup.exe.sig" -exec cp {} "$DIST/Stirling-PDF-${{ matrix.name }}-setup.exe.sig" \;
           elif [ "${{ matrix.platform }}" = "windows-11-arm" ]; then
             # arm64 ships the NSIS installer (WiX MSI has no arm64 support in Tauri).
             # The setup exe is also its own updater payload (-> sibling .sig).
@@ -844,6 +827,10 @@ jobs:
               {
                   'bundles': ['Stirling-PDF-windows-x86_64.msi'],
                   'targets': ['windows-x86_64-msi', 'windows-x86_64'],
+              },
+              {
+                  'bundles': ['Stirling-PDF-windows-x86_64-setup.exe'],
+                  'targets': ['windows-x86_64-nsis'],
               },
               {
                   'bundles': ['Stirling-PDF-windows-arm64-setup.exe'],

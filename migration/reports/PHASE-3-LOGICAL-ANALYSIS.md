@@ -1,6 +1,6 @@
 # Phase 3 — Logical Analysis
 
-Method: source inspection of PDF paths, HTTP handlers, async boundaries, error paths, and file handling, plus live HTTP probing of a standalone server (`JAVA_BACKEND_URL=off PORT=18123`).
+Method: source inspection of PDF paths, HTTP handlers, async boundaries, error paths, and file handling, plus live HTTP probing of the standalone server (early probes ran with `JAVA_BACKEND_URL=off`; the proxy was later deleted entirely — end-state probes ran with no Java configuration at all).
 
 ## A. PDF processing logic
 
@@ -13,10 +13,11 @@ Method: source inspection of PDF paths, HTTP handlers, async boundaries, error p
 
 ## B. HTTP API logic
 
-- Router: ~110 explicit routes in `handlers/mod.rs`, `.fallback(proxy::proxy)` last; explicit routes win over proxy — verified (migrated routes serve natively, unmigrated 404 with backend off).
+- Router: ~110 explicit routes in `handlers/mod.rs`; the fallback 404s unmigrated `/api/**` paths and serves the SPA/static surface otherwise — verified.
 - Multipart: single `receive_multipart`/`receive_files_multipart` in `upload.rs` — no per-handler re-implementation found.
 - Error contract: `AppError` → `application/problem+json` with `type` URIs matching Java `ErrorTypes`; internal details hidden (verified: invalid PDF → 400 `invalid-argument`; missing `fileInput` → 400; bad angle → 400; out-of-range page → 400; wrong method → 405).
 - Honest failure: missing engines produce 4xx/5xx with real errors, not fake success (verified `pdf-to-text` pre-fix 500 came from a real lopdf error, now fixed; engine-dependent groups disabled at boot with warnings).
+- Unported modes: at audit end-state every former Java-delegation branch returns an explicit `AppError::BadRequest` naming the unimplemented mode (verified live: `flatten` raster mode, text watermark → 400 with clear detail). No silent fallbacks remain — the Java proxy itself was deleted during the audit window.
 - Async jobs: `?async=true` verified end-to-end — submit → `jobId` → `GET job/{id}` complete → `GET job/{id}/result` returns stored PDF bytes (200, `application/pdf`, correct `Content-Disposition` filename `basic_rotated.pdf`).
 - File download: `GET /api/v1/general/files/{fileId}` serves stored bytes (verified 200).
 - Disabled endpoints: `guard::api_guard` → 403 + `endpointconfig` enablement (unit-tested).
@@ -51,4 +52,5 @@ Method: source inspection of PDF paths, HTTP handlers, async boundaries, error p
 - `reqwest` `blocking` feature likely unused.
 - `#![allow(dead_code)]` on `convert.rs`, `pdfdoc.rs`, `pdftext` masks real unused surface.
 - `jobs::submit` buffers entire results in memory.
-- No Rust-level HTTP integration tests (`tests/integration/` empty); coverage is unit + shell smoke.
+- No Rust-level HTTP integration tests (`tests/integration/` empty); coverage is unit + the native `stirling test` smoke harness.
+- `AppState::new/persistent` keep a dead `Option<()>` parameter as a Java-proxy-era compat shim — simplifiable once callers settle.

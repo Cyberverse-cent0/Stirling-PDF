@@ -46,12 +46,12 @@ Audited 2026-11-06. Scope: `rust/` workspace (`stirling-server`, `stirling-macro
 
 ## `src/handlers/` — API layer
 
-22 modules, ~54 `#[endpoint]` handlers + hand-written routes in `mod.rs` (~110 explicit routes + `/api/**` fallback proxy). Largest files: `form.rs` (5383), `convert.rs` (5206), `misc.rs` (3615), `security.rs` (2566), `automation.rs` (1803), `visual.rs` (1565), `platform.rs` (1397), `eml.rs` (1264), `pipeline.rs` (1079), `split.rs` (962), `general.rs` (931), `layout.rs` (893), `transform.rs` (644), `filter.rs` (640), `passwords.rs` (611), `scanner.rs` (608), `ocr.rs` (416), `analysis.rs` (410), `jobs.rs` (796), `proxy.rs` (365), `merge.rs`, `image_scans.rs` (405).
+22 modules, ~54 `#[endpoint]` handlers + hand-written routes in `mod.rs` (~110 explicit routes + a fallback that 404s unmigrated `/api/**` and serves the SPA otherwise). Largest files: `form.rs` (5383), `convert.rs` (5206), `misc.rs` (3615), `security.rs` (2566), `automation.rs` (1803), `visual.rs` (1565), `platform.rs` (1397), `eml.rs` (1264), `pipeline.rs` (1079), `split.rs` (962), `general.rs` (931), `layout.rs` (893), `transform.rs` (644), `filter.rs` (640), `passwords.rs` (611), `scanner.rs` (608), `ocr.rs` (416), `analysis.rs` (410), `jobs.rs` (796), `merge.rs`, `image_scans.rs` (405). (`proxy.rs` was deleted during the audit window.)
 
 Patterns observed:
 - `#[stirling_macros::endpoint]` on synchronous work fns → uniform multipart parse, `?async=true` → `jobs::submit`, inline path via `spawn_blocking`. Hand-written handlers needing pre-dispatch inspection use `misc::dispatch` (same contract).
 - Response helpers centralized: `merge::pdf_response`/`file_response`, `split::zip_response` (octet-stream, Java parity).
-- Java delegation is explicit and opt-in: `proxy::forward_multipart`/`forward_parts` for parameter combinations with no native implementation; returns 404 when `JAVA_BACKEND_URL` is unset (the default).
+- Java delegation: **removed entirely during the audit window** — `proxy.rs`, `JavaBackend`, and all `forward_*` call sites are gone; unported modes return explicit `BadRequest` errors.
 
 ## Dependencies (stirling-server)
 
@@ -71,4 +71,4 @@ Notable: `reqwest` `blocking` feature enabled — no `reqwest::blocking` usage f
 
 - Core PDF ops (rotate/remove/rearrange/merge/split/scale/crop/layout/metadata/attachments/forms/security redact/sanitize): complete, unit-tested, runtime-verified.
 - Engine-backed conversions (LibreOffice, Ghostscript, Chromium, qpdf, tesseract, calibre, unoconvert, weasyprint): implemented via `EngineSpec`; endpoints honestly disable/error when the engine binary is absent (`endpointconfig` probes at boot — verified in server log).
-- Java fallback: opt-in proxy only (`JAVA_BACKEND_URL`), default off.
+- Java fallback: **none — proxy deleted**; unmigrated routes 404, unported modes 400.

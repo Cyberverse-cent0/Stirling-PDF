@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end auto-update test for macOS/Linux.
 #
-# Builds JRE + JAR + signed update bundle, starts server + app,
-# runs CDP tests against the WebView, then cleans up.
+# Builds the stirling-server sidecar + signed update bundle, starts
+# server + app, runs CDP tests against the WebView, then cleans up.
 #
 # Usage:
 #   bash scripts/dev-update-test/test-update-e2e.sh              # check-only
@@ -10,7 +10,8 @@
 #   bash scripts/dev-update-test/test-update-e2e.sh --skip-build  # reuse existing MSI
 #
 # Prerequisites:
-#   - Java 21+ JDK (with jlink)
+#   - Rust toolchain (cargo) — the desktop bundle ships the
+#     stirling-server sidecar, staged into src-tauri/binaries/
 #   - Node.js + npm
 #   - Python 3 (for HTTP server + CDP tests)
 #   - First-time: bash scripts/dev-update-test/setup-dev-updater.sh
@@ -44,6 +45,7 @@ cleanup() {
   [ -n "$APP_PID" ] && kill "$APP_PID" 2>/dev/null || true
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
   pkill -f "stirling-pdf" 2>/dev/null || true
+  pkill -f "stirling-server" 2>/dev/null || true
   echo "  Done"
 }
 trap cleanup EXIT
@@ -58,12 +60,11 @@ if [ ! -f "$KEYS_DIR/dev-update-key" ]; then
 fi
 echo "  Signing keys: OK"
 
-JAVA_VER=$(java -version 2>&1 | head -1 | tr -d '\r"' | awk '{print $3}' | cut -d. -f1)
-if [ -z "$JAVA_VER" ] || [ "$JAVA_VER" -lt 21 ]; then
-  echo "  Error: Java 21+ required, found Java $JAVA_VER"
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "  Error: cargo not found — the desktop bundle needs the stirling-server sidecar"
   exit 1
 fi
-echo "  Java $JAVA_VER: OK"
+echo "  Rust toolchain: OK"
 
 # Detect python command (python3 on macOS/Linux, python on Windows Git Bash)
 PYTHON="python3"
@@ -103,40 +104,24 @@ case "$OS" in
     ;;
 esac
 
-# ── Step 1: Build JRE + JAR ──────────────────────────────────────────────────
-JRE_JAVA="$TAURI_DIR/runtime/jre/bin/java"
-JAR_GLOB="$TAURI_DIR/libs/stirling-pdf-*.jar"
-
-if [ "$SKIP_BUILD" = false ] || ! ls $JAR_GLOB >/dev/null 2>&1 || [ ! -f "$JRE_JAVA" ]; then
+# ── Step 1: Stage Rust backend sidecar + engines ─────────────────────────────
+# `npx tauri build`/`dev` only run the frontend beforeBuildCommand — the
+# sidecar and engine trees must already be in src-tauri/ (same staging
+# `task desktop:prepare` performs).
+if [ "$SKIP_BUILD" = false ] || ! ls "$TAURI_DIR"/binaries/stirling-server-* >/dev/null 2>&1; then
   echo ""
-  echo "=== Building backend JAR ==="
+  echo "=== Building + staging stirling-server sidecar ==="
   cd "$REPO_ROOT"
-  DISABLE_ADDITIONAL_FEATURES=true ./gradlew bootJar -x test --no-daemon 2>&1 | tail -3
-
-  BUILT_JAR=$(ls -t app/core/build/libs/stirling-pdf-*.jar 2>/dev/null | head -1 || true)
-  if [ -z "$BUILT_JAR" ]; then echo "Error: JAR not found"; exit 1; fi
-
-  mkdir -p "$TAURI_DIR/libs"
-  # Remove any dummy jars
-  find "$TAURI_DIR/libs" -name "*.jar" -size -1k -delete 2>/dev/null || true
-  cp "$BUILT_JAR" "$TAURI_DIR/libs/"
-  echo "  JAR: $(basename "$BUILT_JAR") ($(du -h "$BUILT_JAR" | cut -f1))"
-
-  if [ ! -f "$JRE_JAVA" ]; then
-    echo ""
-    echo "=== Building JRE with jlink ==="
-    rm -rf "$TAURI_DIR/runtime/jre"
-    MODULES="java.base,java.compiler,java.desktop,java.instrument,java.logging,java.management,java.naming,java.net.http,java.prefs,java.rmi,java.scripting,java.security.jgss,java.security.sasl,java.sql,java.transaction.xa,java.xml,java.xml.crypto,jdk.crypto.ec,jdk.crypto.cryptoki,jdk.unsupported"
-    jlink \
-      --add-modules "$MODULES" \
-      --strip-debug \
-      --no-header-files \
-      --no-man-pages \
-      --output "$TAURI_DIR/runtime/jre"
-    echo "  JRE: OK"
-  else
-    echo "  JRE: already exists"
-  fi
+  cargo build --release --manifest-path rust/Cargo.toml --bin stirling-server
+  SERVER_BIN="rust/target/release/stirling-server"
+  case "$OS" in MINGW*|MSYS*|CYGWIN*) SERVER_BIN="${SERVER_BIN}.exe" ;; esac
+  cargo run --release --manifest-path frontend/src-tauri/Cargo.toml \
+    --package stirling-desktop-build -- \
+    stage-rust-server frontend/src-tauri/binaries "$REPO_ROOT/$SERVER_BIN"
+  cargo run --release --manifest-path frontend/src-tauri/Cargo.toml \
+    --package stirling-desktop-build -- \
+    stage-engines frontend/src-tauri/engines
+  echo "  Sidecar + engines staged"
 fi
 
 # ── Step 2: Build signed update bundle ────────────────────────────────────────
@@ -189,7 +174,7 @@ if [ "$SKIP_BUILD" = false ] || [ -z "$BUNDLE_FILE" ]; then
   cat > "$OUTPUT_DIR/latest.json" << EOF
 {
   "version": "99.0.0",
-  "notes": "Test update v99.0.0 - built with real JRE + backend",
+  "notes": "Test update v99.0.0 - built with Rust backend sidecar",
   "pub_date": "$PUB_DATE",
   "platforms": {
     "$TAURI_PLATFORM": {

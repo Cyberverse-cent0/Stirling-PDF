@@ -9,23 +9,27 @@
 | `cargo clippy --workspace --all-targets -- -D warnings` | **FAILED** — ~137 errors, concentrated in `#[cfg(test)]` code (`err_expect`, `manual_range_contains`, etc.) |
 | `cargo test --workspace` | **PASSED** — 382 tests (server bin) + cli/macros suites, 0 failures |
 
-## Final gate results (audit end)
+## Final gate results (audit end, settled tree)
 
-Concurrent agents landed substantial work during the audit (new `image_split.rs`, `fonts.rs`, `pdftext::redact`, auto-redact routes, CLI test commands). Final observed state:
+Concurrent agents landed substantial work during the audit (new `image_split.rs`, `fonts.rs`, `pdftext::redact`, auto-redact routes, CLI test commands, native smoke harness replacing shell scripts, Java-proxy deletion). Final verified state:
 
 | Command | Result |
 |---|---|
-| `cargo check --workspace` | **PASSED** (after wiring missing `mod image_split;` — see below) |
-| `cargo test --bin stirling-server` | **PASSED — 430 tests, 0 failed, 1 ignored** (`tabula::dense_grid_perf` perf probe) |
-| `cargo fmt --check` | **FAILED** — diffs remain exclusively in files owned by the concurrent agent's in-flight work (`image_scans.rs`, `image_split.rs`, `lib.rs`); all files touched by this audit are rustfmt-clean |
-| `cargo clippy … -D warnings` | Not re-run to completion at end-state; earlier failure was test-code lints, many since fixed by concurrent work (dead-code warnings dropped from ~116 to ~8) |
+| `cargo fmt --check` | **PASSED** — clean |
+| `cargo check --workspace` | **PASSED** — zero errors, zero warnings |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **PASSED — 0 errors** (the ~137 baseline failures were resolved by concurrent work + this audit's consolidation) |
+| `cargo test --workspace` | **PASSED — 461 tests, 0 failed, 2 ignored** at gate time; +11 in-crate HTTP tests (`src/apitests.rs`) added afterwards — all pass |
+
+## In-crate HTTP integration tests (`src/apitests.rs`, 11 tests)
+
+Added post-gate: the real `handlers::router(AppState::new())` exercised in-process via `tower::ServiceExt::oneshot` (the `metrics.rs` test pattern), with hand-built multipart bodies and `tests/fixtures/` PDFs. Covers: health/version, rotate→valid PDF (page count verified via lopdf), merge→2-page PDF, `pdf-to-text` with real extracted text ("Hello Stirling" — exercises the P1 off-by-one fix end-to-end), invalid angle/missing file/non-PDF → 400 problem+json, unsupported watermark mode → honest 400, unknown route/job → 404 problem+json, and the full async job lifecycle (submit → poll → result file download).
 
 ## Fixes made to keep the build green
 
 1. `src/main.rs`: added missing `mod image_split;` — `handlers/image_scans.rs` imported `crate::image_split` but the module was never declared (E0432). The 20 KB `src/image_split.rs` existed untracked; wiring it restored compilation.
 2. `src/image_split.rs`: added `#[derive(Debug)]` to `SplitResult` — the module's own test used `{results:?}` (E0277).
 
-## Unit test coverage observed (430 tests)
+## Unit test coverage observed (461 tests)
 
 Strong coverage in: `upload` (param semantics), `page_select` (selection syntax), `config` (CORS patterns), `error` (problem+json mapping), `convert` (EngineSpec, find_executable, run/timeout — real subprocess tests), `jobstore` (SQLite round-trip), `metrics`, `web` (traversal, clean-url), `attachments`, `auth`, `settings`, `endpointconfig`, `imgcomp`/`imgextract`, `tabula` (incl. adversarial ruling cap), `pdfdoc` (to-single-page edge cases), `pdftext::*` (redact, gfm_table, column_ranges, word_geometry, model), `handlers::*` (automation auto-split, image_scans split_photos, passwords encrypted round-trip, visual QR/stamp, layout params).
 
@@ -36,9 +40,9 @@ Strong coverage in: `upload` (param semantics), `page_select` (selection syntax)
 - Permanently ignored: `tabula::dense_grid_perf` (`#[ignore]` perf probe — justified, runs on demand).
 - Java-dependent tests: none found; all tests run without Java.
 
-## Runtime HTTP verification (standalone, `JAVA_BACKEND_URL=off`)
+## Runtime HTTP verification (standalone)
 
-Server booted on `:18123`; verified:
+Two server boots were exercised. Early probes ran on the pre-removal binary with `JAVA_BACKEND_URL=off`; **end-state probes ran on the final binary with no Java configuration at all** (the proxy was deleted mid-audit). Verified:
 
 | Probe | Result |
 |---|---|
@@ -55,6 +59,8 @@ Server booted on `:18123`; verified:
 | `POST /convert/pdf/text?outputFormat=txt` | **was 500 (off-by-one defect) → now 200 `text/plain` after fix** |
 | `POST /convert/pdf/markdown` | 200 `text/markdown` |
 | Unmigrated `/api/v1/general/nonexistent-thing` | 404 problem+json (no Java backend) |
+| `POST /misc/flatten` raster mode, `POST /security/add-watermark` text mode (end-state) | 400 problem+json — explicit "not implemented" detail, no proxy |
+| Unknown job id (end-state) | 404 problem+json |
 | GET on POST-only route | 405 |
 | 5 concurrent rotate requests | all 200 |
 

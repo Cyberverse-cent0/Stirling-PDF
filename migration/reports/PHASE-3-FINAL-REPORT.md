@@ -4,7 +4,7 @@ Audit date: 2026-11-06. Scope: `rust/` workspace (`stirling-server` ~56k LOC, `s
 
 ## 1. Overall assessment
 
-The Rust backend is in **good health**: it compiles cleanly, all 430 unit tests pass, `cargo fmt --check` is clean at end-state, and the server runs fully standalone (`JAVA_BACKEND_URL=off`) with honest error semantics and Java-parity API contracts. The codebase is already well-factored (shared `upload`/`pdfdoc`/`convert`/`page_select`/`endpointconfig` layers, a proc-macro for the uniform endpoint contract, typed `AppError` → problem+json). Remaining risks are concentrated in: (a) a large in-progress migration surface where some endpoints still delegate to the opt-in Java proxy, (b) blanket `#![allow(dead_code)]` masking unused surface in `pdfdoc`/`convert`/`pdftext`, and (c) absence of Rust-level HTTP integration tests.
+The Rust backend is in **good health**: it compiles cleanly, all **461 workspace tests pass**, `cargo fmt --check` is clean, and `cargo clippy --workspace --all-targets -- -D warnings` passes with zero errors. Unported parameter modes now return explicit 400s instead of delegating. The codebase is already well-factored (shared `upload`/`pdfdoc`/`convert`/`page_select`/`endpointconfig` layers, a proc-macro for the uniform endpoint contract, typed `AppError` → problem+json). Remaining risks are concentrated in: (a) blanket `#![allow(dead_code)]` masking unused surface in `pdfdoc`/`convert`/`pdftext`, and (b) absence of Rust-level HTTP integration tests.
 
 ## 2. Testing results
 
@@ -12,11 +12,11 @@ The Rust backend is in **good health**: it compiles cleanly, all 430 unit tests 
 |---|---|---|
 | `cargo fmt --check` | FAIL (diffs in concurrently-edited files) | **PASS** |
 | `cargo check --workspace` | PASS w/ ~116 warnings (after transient concurrent-edit errors cleared) | **PASS, zero warnings** |
-| `cargo clippy --workspace --all-targets -- -D warnings` | FAIL — ~137 errors, mostly `#[cfg(test)]` lints | See note below |
-| `cargo test --workspace` / `--bin stirling-server` | 382→384 passing | **430 passed, 0 failed, 1 ignored** (perf probe) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | FAIL — ~137 errors, mostly `#[cfg(test)]` lints | **PASS — 0 errors** |
+| `cargo test --workspace` / `--bin stirling-server` | 382→384 passing | **461 passed, 0 failed, 2 ignored** (458 server + 3 CLI; ignores: perf probe + doc-test) |
 | Runtime HTTP (standalone) | — | **PASS** — see Test Report for the probe matrix |
 
-Clippy note: the initial `-D warnings` failure was dominated by test-code lints (`err_expect`, `manual_range_contains`, etc.) and dead-code warnings that concurrent agents have since cleaned up; `cargo check` at end-state emits **zero warnings**. A final `-D warnings` clippy run was queued behind concurrent builds at report time — rerun `cargo clippy --workspace --all-targets -- -D warnings` to confirm; any residual lints are in concurrently-owned files.
+Clippy note: the initial `-D warnings` failure was dominated by test-code lints and dead-code warnings that concurrent agents plus this audit's consolidation resolved; the final run on the settled tree is fully clean.
 
 ## 3. Logical defects
 
@@ -32,7 +32,7 @@ No P0 (data-corruption/security/crash) defects found in audited paths. Page inde
 
 ## 4. Duplicate-code elimination
 
-Consolidated (all verified by `cargo check` + 430 passing tests):
+Consolidated (verified by `cargo check` + 461 passing tests):
 
 - `first_upload`: 4 identical copies → `upload::first_upload`.
 - `simple_name`: 5 identical copies → `upload::simple_name` (incl. repointing `pipeline.rs` off `automation::simple_name`).
@@ -48,7 +48,7 @@ Intentionally retained: `load_pdf` variants (different return contracts), `trans
 - `TODO(jpdfium)` markers in `pdftext/form_values.rs`, `pdftext/page_images.rs` lack issue numbers (repo convention requires `TODO(#issue)`).
 - `reqwest` `blocking` feature appears unused — candidate trim (P3, verify first).
 - No `[workspace.dependencies]` table — three members pin deps independently; versions currently consistent.
-- `tests/integration/` empty — no Rust HTTP integration tests (shell smoke scripts fill the gap transitionally).
+- `tests/integration/` (crate-level dir) still empty, but `src/apitests.rs` now provides 11 in-process HTTP tests against the real router — the gap is substantially closed; remaining value would be live-socket tests (the `stirling test` smoke harness covers those).
 
 ## 6. Performance
 
@@ -58,17 +58,17 @@ Intentionally retained: `load_pdf` variants (different return contracts), `trans
 
 ## 7. Standalone operation
 
-**Confirmed.** `JAVA_BACKEND_URL` is opt-in (default off). With it off: unmigrated `/api` routes 404 cleanly, all migrated endpoints work, job store persists via SQLite, SPA/static serving works, external engines (gs/LibreOffice/etc.) degrade honestly. ~20 explicit `forward_multipart`/`forward_parts` delegation branches remain for unimplemented parameter combinations — they 404 standalone rather than fake success. No Java process/jar/`JAVA_HOME` dependency exists anywhere in `rust/`.
+**Confirmed — total Java independence.** During the audit window the migration agents deleted the entire proxy layer: `proxy.rs`, `config::JavaBackend`, `JAVA_BACKEND_URL`, and every `forward_*` call site are gone (`grep` returns zero hits). Unmigrated `/api` routes 404; unported parameter modes return explicit `AppError::BadRequest`s naming what's missing (verified live). All migrated endpoints, the async job framework (SQLite-persisted), SPA serving, and external non-Java engines work with zero Java configuration. The only vestige is `AppState::new/persistent`'s ignored `Option<()>` parameter kept for compile compatibility.
 
 ## 8. Remaining issues
 
 - **Known bugs:** none outstanding in audited code (the one found was fixed and verified).
-- **Incomplete features:** ~20 Java-delegation branches (office-format edge cases, `flatten` raster path now has a native Ghostscript implementation in-flight by another agent, eml `@`-marker extraction, image_scans native port landing); proprietary/saas surface intentionally out of scope.
+- **Incomplete features:** unported parameter modes now fail honestly with 400s (text stamps/watermarks, flatten raster — native port landed in-flight, compress `lineArt`, replace-invert non-CMYK modes, extract-images codec gaps, office-convert branches, auto-rotate `osd`, eml `@`-markers); proprietary/saas surface intentionally out of scope.
 - **Missing external engines (environment):** qpdf, unoconvert, weasyprint, tesseract, ocrmypdf, rar, calibre, OpenCV — endpoints auto-disable with warnings.
 - **Environment limitations:** none blocking; all tests ran natively.
 - **Architectural improvements:** workspace deps table; item-level dead-code audit post-migration; consider streaming job-result storage to disk for very large outputs.
-- **Deferred work:** Rust HTTP integration tests (`tests/integration/`); clippy `-D warnings` confirmation once concurrent edits settle.
+- **Deferred work:** unported parameter modes (see §8); live-socket integration tests beyond the smoke harness.
 
 ## 9. Recommended next phase
 
-**Phase 4 — HTTP integration test harness + remaining Java-delegation elimination.** Build `tests/integration/` (axum `tower::ServiceExt` oneshot or live-server harness) covering the verified probe matrix as automated tests; then burn down the ~20 `forward_multipart` branches endpoint-by-endpoint (several are already being ported natively by concurrent agents — `flatten` raster, `image_split`, `pdfa_convert` post-processing). After that, the `JAVA_BACKEND_URL` proxy can be deprecated.
+**Phase 4 — HTTP integration test harness + unported-mode completion.** Build `tests/integration/` (axum `tower::ServiceExt` oneshot or live-server harness — the native `stirling test` smoke harness in `cli/src/commands/smoke.rs` is a working template) covering the verified probe matrix as automated tests; then burn down the remaining unported modes (text stamp/watermark font embedding, compress line-art, replace-invert raster modes, extract-images codec coverage, eml `@`-markers). The Java decommission itself is already done — `proxy.rs` is deleted.

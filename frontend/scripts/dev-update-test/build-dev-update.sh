@@ -42,6 +42,22 @@ case "$OS" in
     ;;
 esac
 
+# ── stage Rust backend sidecar + engines ─────────────────────────────────────
+# `npx tauri build` only runs the frontend beforeBuildCommand — the sidecar
+# and engine trees must already be in src-tauri/ (same staging
+# `task desktop:prepare` performs).
+REPO_ROOT="$(cd "$FRONTEND_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+cargo build --release --manifest-path rust/Cargo.toml --bin stirling-server
+SERVER_BIN="rust/target/release/stirling-server"
+case "$OS" in MINGW*|MSYS*|CYGWIN*) SERVER_BIN="${SERVER_BIN}.exe" ;; esac
+cargo run --release --manifest-path frontend/src-tauri/Cargo.toml \
+  --package stirling-desktop-build -- \
+  stage-rust-server frontend/src-tauri/binaries "$REPO_ROOT/$SERVER_BIN"
+cargo run --release --manifest-path frontend/src-tauri/Cargo.toml \
+  --package stirling-desktop-build -- \
+  stage-engines frontend/src-tauri/engines
+
 # ── build ─────────────────────────────────────────────────────────────────────
 echo "Building signed update bundle (version $VERSION, platform $TAURI_PLATFORM)..."
 echo "This takes a few minutes — Rust is compiling."

@@ -426,12 +426,12 @@ tasks:
       - '{{.STIRLING}} start engine --cwd rust/engine -- env PORT={{.PORT | default "5001"}} cargo run'
 
   engine:bg:stop:
-    desc: "Stop the Python engine"
+    desc: "Stop the Rust AI engine"
     cmds:
       - '{{.STIRLING}} stop engine'
 
   engine:bg:restart:
-    desc: "Restart the Python engine"
+    desc: "Restart the Rust AI engine"
     cmds:
       - task: engine:bg:stop
       - task: engine:bg

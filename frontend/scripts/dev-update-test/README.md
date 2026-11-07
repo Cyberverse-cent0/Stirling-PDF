@@ -6,7 +6,7 @@
 # First time only:
 npm run tauri:setup-dev-update
 
-# Run tests (builds JRE + JAR + signed bundle, starts server + app, runs checks):
+# Run tests (builds the Rust backend sidecar + signed bundle, starts server + app, runs checks):
 npm run tauri:test-update-e2e
 
 # Full install test (downloads + installs the update):
@@ -26,10 +26,13 @@ npm run tauri:serve-dev-update
 npm run tauri:dev-with-update
 ```
 
+The app needs the `stirling-server` sidecar staged in `src-tauri/binaries/`
+first — run `task desktop:rust-server` (or the e2e script, which stages it).
+
 Go to Settings > General > Software Updates. Click "Check for Updates" then "Install Now".
 
 ## Requires
 
-- Java 21+ JDK (with `jlink`)
+- Rust toolchain (`cargo`) — the app bundles the `stirling-server` sidecar
 - Node.js, Python 3 (with `pip install websockets`)
 - First-time setup generates signing keys + config override
