@@ -67,11 +67,27 @@ tasks:
     desc: "Build stirling-server and stage it as a Tauri sidecar binary"
     dir: ..
     cmds:
-      - cargo build --release --manifest-path rust/Cargo.toml --bin stirling-server
-      - cmd: cargo run --release --manifest-path frontend/src-tauri/Cargo.toml --package stirling-desktop-build -- stage-rust-server rust/target/release/stirling-server.exe frontend/src-tauri/binaries
+      # macOS ships a universal .app: `tauri build --target
+      # universal-apple-darwin` looks for a single fat
+      # `stirling-server-universal-apple-darwin` sidecar, while per-arch
+      # `--target` builds and `tauri dev` need the arch-suffixed names.
+      # Build both arches, lipo them, and stage all three.
+      - cmd: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+        platforms: [darwin]
+      - cmd: cargo build --release --manifest-path rust/Cargo.toml --bin stirling-server --target aarch64-apple-darwin
+        platforms: [darwin]
+      - cmd: cargo build --release --manifest-path rust/Cargo.toml --bin stirling-server --target x86_64-apple-darwin
+        platforms: [darwin]
+      - cmd: mkdir -p rust/target/release && lipo -create rust/target/aarch64-apple-darwin/release/stirling-server rust/target/x86_64-apple-darwin/release/stirling-server -output rust/target/release/stirling-server-universal
+        platforms: [darwin]
+      - cmd: cargo run --release --manifest-path frontend/src-tauri/Cargo.toml --package stirling-desktop-build -- stage-rust-server frontend/src-tauri/binaries rust/target/aarch64-apple-darwin/release/stirling-server=aarch64-apple-darwin rust/target/x86_64-apple-darwin/release/stirling-server=x86_64-apple-darwin rust/target/release/stirling-server-universal=universal-apple-darwin
+        platforms: [darwin]
+      - cmd: cargo build --release --manifest-path rust/Cargo.toml --bin stirling-server
+        platforms: [linux, windows]
+      - cmd: cargo run --release --manifest-path frontend/src-tauri/Cargo.toml --package stirling-desktop-build -- stage-rust-server frontend/src-tauri/binaries rust/target/release/stirling-server.exe
         platforms: [windows]
-      - cmd: cargo run --release --manifest-path frontend/src-tauri/Cargo.toml --package stirling-desktop-build -- stage-rust-server rust/target/release/stirling-server frontend/src-tauri/binaries
-        platforms: [linux, darwin]
+      - cmd: cargo run --release --manifest-path frontend/src-tauri/Cargo.toml --package stirling-desktop-build -- stage-rust-server frontend/src-tauri/binaries rust/target/release/stirling-server
+        platforms: [linux]
 
   dev:
     desc: "Start Tauri desktop dev mode"

@@ -322,5 +322,8 @@ frontend/src-tauri/binaries/
 # Rust build artifacts
 rust/target/
 rust/pdfium-native/target/
+# Rust AI engine runtime state (SQLite stores, created on first boot)
+rust/engine/data/
+rust/engine/target/
 target/
 

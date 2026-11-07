@@ -114,14 +114,29 @@ tauri: &tauri
   - .github/workflows/rust-lint.yml
   - Taskfile.yml
   - .taskfiles/desktop.yml
+  # The rust-backend bundle compiles stirling-server from rust/ and embeds
+  # rust/assets; rust/engine is the standalone AI engine, not part of the
+  # desktop artifact, so rust/ is listed by compile input rather than as
+  # rust/** (which would also match rust/engine/**).
+  - rust/Cargo.toml
+  - rust/Cargo.lock
+  - rust/src/**
+  - rust/macros/**
+  - rust/assets/**
+  - rust/.cargo/**
+  # include_str!'d into the server binary; a change here breaks `cargo build`.
+  - app/core/src/main/resources/static/3rdPartyLicenses.json
 
 # Files that affect the Rust backend server in rust/ (the strangler-fig
 # replacement for the Java API). Changes run cargo clippy + tests.
 rust-server: &rust-server
   - *ci
   - rust/**
+  - Taskfile.yml
   - .taskfiles/rust.yml
   - .github/workflows/rust-server.yml
+  # include_str!'d into the server binary; a change here breaks `cargo build`.
+  - app/core/src/main/resources/static/3rdPartyLicenses.json
 
 # Files that affect the AI engine, including its Python tool models, fixers,
 # and tests. The engine validation job also runs when the Java tool surfaces

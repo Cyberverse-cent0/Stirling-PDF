@@ -26,7 +26,7 @@ fn run() -> Result<(), String> {
 }
 
 fn usage() -> String {
-    "Usage: stirling-desktop-build <build-provisioner | stage-backend-jar <source-dir> <dest-dir> [version] | stage-rust-server <source-binary> <dest-dir> | stage-engines [dest-dir] | verify-bundled-jre [release-file]>".to_string()
+    "Usage: stirling-desktop-build <build-provisioner | stage-backend-jar <source-dir> <dest-dir> [version] | stage-rust-server <dest-dir> <source>[@<triple>]... | stage-engines [dest-dir] | verify-bundled-jre [release-file]>".to_string()
 }
 
 fn workspace_dir() -> PathBuf {
@@ -170,29 +170,44 @@ fn stage_backend_jar(args: &[String]) -> Result<(), String> {
 }
 
 /// Tauri `externalBin` sidecars must be named `<name>-<target-triple>[.exe]`
-/// in `src-tauri/binaries/`. Stage the release `stirling-server` binary
-/// under that name so `bundle.externalBin` picks it up.
+/// in `src-tauri/binaries/`. Stage release `stirling-server` binaries under
+/// those names so `bundle.externalBin` picks them up.
+///
+/// `stage-rust-server <dest-dir> <source>[@<triple>]...` — a bare source uses
+/// `STIRLING_SERVER_TARGET` or the rustc host triple; `source=triple` stages
+/// under an explicit triple. Universal macOS builds need per-arch binaries
+/// plus a `lipo`'d `universal-apple-darwin` one, so several specs may be
+/// staged in a single call (the stale-binary sweep runs once up front).
 fn stage_rust_server(args: &[String]) -> Result<(), String> {
-    if args.len() != 2 {
+    if args.len() < 2 {
         return Err(usage());
     }
-    let source = PathBuf::from(&args[0]);
-    let destination_dir = PathBuf::from(&args[1]);
-    if !source.is_file() {
-        return Err(format!(
-            "Expected stirling-server binary at {}; build rust/ first.",
-            source.display()
-        ));
+    let destination_dir = PathBuf::from(&args[0]);
+
+    let mut specs = Vec::with_capacity(args.len() - 1);
+    for arg in &args[1..] {
+        let (source, explicit_triple) = match arg.split_once('=') {
+            Some((source, triple)) => (source.to_string(), Some(triple.to_string())),
+            None => (arg.clone(), None),
+        };
+        let source = PathBuf::from(source);
+        if !source.is_file() {
+            return Err(format!(
+                "Expected stirling-server binary at {}; build rust/ first.",
+                source.display()
+            ));
+        }
+        let triple = explicit_triple
+            .or_else(|| env::var("STIRLING_SERVER_TARGET").ok())
+            .filter(|t| !t.trim().is_empty())
+            .or_else(rustc_host_triple)
+            .ok_or_else(|| {
+                "Cannot determine target triple; set STIRLING_SERVER_TARGET".to_string()
+            })?;
+        specs.push((source, triple));
     }
 
-    let triple = env::var("STIRLING_SERVER_TARGET")
-        .ok()
-        .filter(|t| !t.trim().is_empty())
-        .or_else(rustc_host_triple)
-        .ok_or_else(|| "Cannot determine target triple; set STIRLING_SERVER_TARGET".to_string())?;
     let exe_suffix = if cfg!(windows) { ".exe" } else { "" };
-    let destination_name = format!("stirling-server-{triple}{exe_suffix}");
-
     fs::create_dir_all(&destination_dir)
         .map_err(|error| format!("Failed to create {}: {error}", destination_dir.display()))?;
     // Drop stale stagings for other triples so a previous target can't ship.
@@ -218,20 +233,23 @@ fn stage_rust_server(args: &[String]) -> Result<(), String> {
         }
     }
 
-    let destination = destination_dir.join(&destination_name);
-    fs::copy(&source, &destination).map_err(|error| {
-        format!(
-            "Failed to copy {} to {}: {error}",
-            source.display(),
-            destination.display()
-        )
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&destination, fs::Permissions::from_mode(0o755));
+    for (source, triple) in &specs {
+        let destination_name = format!("stirling-server-{triple}{exe_suffix}");
+        let destination = destination_dir.join(&destination_name);
+        fs::copy(source, &destination).map_err(|error| {
+            format!(
+                "Failed to copy {} to {}: {error}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&destination, fs::Permissions::from_mode(0o755));
+        }
+        println!("Staged {destination_name} in {}", destination_dir.display());
     }
-    println!("Staged {destination_name} in {}", destination_dir.display());
     Ok(())
 }
 
@@ -1125,8 +1143,8 @@ mod tests {
         fs::write(&source, "binary").unwrap();
 
         stage_rust_server(&[
-            source.to_string_lossy().into_owned(),
             destination.to_string_lossy().into_owned(),
+            source.to_string_lossy().into_owned(),
         ])
         .unwrap();
 
@@ -1137,5 +1155,34 @@ mod tests {
             .collect();
         assert_eq!(staged.len(), 1);
         assert!(staged[0].starts_with("stirling-server-"));
+    }
+
+    #[test]
+    fn stages_multiple_triples_in_one_call() {
+        let temporary = TemporaryDirectory::new();
+        let arm = temporary.0.join("stirling-server-arm");
+        let intel = temporary.0.join("stirling-server-intel");
+        let universal = temporary.0.join("stirling-server-universal");
+        let destination = temporary.0.join("binaries");
+        fs::write(&arm, "arm").unwrap();
+        fs::write(&intel, "intel").unwrap();
+        fs::write(&universal, "universal").unwrap();
+
+        stage_rust_server(&[
+            destination.to_string_lossy().into_owned(),
+            format!("{}=aarch64-apple-darwin", arm.display()),
+            format!("{}=x86_64-apple-darwin", intel.display()),
+            format!("{}=universal-apple-darwin", universal.display()),
+        ])
+        .unwrap();
+
+        for name in [
+            "stirling-server-aarch64-apple-darwin",
+            "stirling-server-x86_64-apple-darwin",
+            "stirling-server-universal-apple-darwin",
+        ] {
+            assert!(destination.join(name).is_file(), "missing {name}");
+        }
+        assert_eq!(fs::read_dir(&destination).unwrap().count(), 3);
     }
 }

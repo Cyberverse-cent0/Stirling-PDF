@@ -291,7 +291,49 @@ fn find_rust_server(resource_dir: &Path) -> Option<PathBuf> {
         }
     }
     candidates.sort();
-    candidates.pop()
+    // Dev staging can hold several triples at once (macOS stages
+    // aarch64 + x86_64 + universal). Prefer the unsuffixed packaged name,
+    // then this host's arch, then the fat universal binary — alphabetical
+    // order alone would pick x86_64 on Apple Silicon.
+    let host_triple = host_triple_hint();
+    let name_of = |p: &&PathBuf| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+    };
+    candidates
+        .iter()
+        .find(|p| name_of(p) == exe)
+        .or_else(|| {
+            host_triple
+                .as_deref()
+                .and_then(|t| candidates.iter().find(|p| name_of(p).contains(t)))
+        })
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|p| name_of(p).contains("universal-apple-darwin"))
+        })
+        .or_else(|| candidates.last())
+        .cloned()
+}
+
+/// Best-effort `<arch>-<os>` triple for the running build, used only to rank
+/// sidecar candidates — a miss just falls through to the universal/last pick.
+fn host_triple_hint() -> Option<String> {
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "aarch64",
+        "x86_64" => "x86_64",
+        _ => return None,
+    };
+    let os = match std::env::consts::OS {
+        "macos" => "apple-darwin",
+        "linux" => "unknown-linux-gnu",
+        "windows" => "pc-windows-msvc",
+        _ => return None,
+    };
+    Some(format!("{arch}-{os}"))
 }
 
 /// Which backend the desktop shell spawns. `STIRLING_DESKTOP_BACKEND`

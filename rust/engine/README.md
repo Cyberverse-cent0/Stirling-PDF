@@ -237,5 +237,9 @@ Taskfile: `task rust:engine:check` runs fmt + clippy + tests for this crate.
   keeps them naive and lets the store compare them.
 - 422 bodies carry a single `detail` string rather than pydantic's
   per-field error list — Java only surfaces the status + detail upstream.
+- `/api/v1/agents/capabilities` `input_schema` values are schemars
+  draft-07 (`definitions`, `title`) where pydantic emits draft 2020-12
+  (`$defs`, no title). Capability ids, names, descriptions and versions
+  are identical; only the schema dialect differs.
 - Voyage `input_type` is sent as a top-level JSON field (same effective
   wire shape as pydantic-ai's `extra_body` merge).

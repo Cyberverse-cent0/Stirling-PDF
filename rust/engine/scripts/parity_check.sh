@@ -49,20 +49,54 @@ DOCparse_BODY='{
   "chunkSize": 200,
   "overlap": 40,
   "blocks": [
-    {"text": "# Title\n\nFirst paragraph with some words.", "pageStart": 1, "pageEnd": 1, "headingPath": ["Title"]},
-    {"text": "Second paragraph.\n\n- list item one\n- list item two", "pageStart": 2, "pageEnd": 2},
-    {"text": "A much longer paragraph that should force the packer to split across the configured chunk size boundary with overlap carried between chunks.", "pageStart": 3, "pageEnd": 3, "headingPath": ["Title", "Details"]}
+    {"markdown": "# Title\n\nFirst paragraph with some words.", "pageStart": 1, "pageEnd": 1, "headingPath": ["Title"]},
+    {"markdown": "Second paragraph.\n\n- list item one\n- list item two", "pageStart": 2, "pageEnd": 2},
+    {"markdown": "A much longer paragraph that should force the packer to split across the configured chunk size boundary with overlap carried between chunks.", "pageStart": 3, "pageEnd": 3, "headingPath": ["Title", "Details"]}
   ]
 }'
 check "docparse ingest chunks" POST "/api/v1/docparse/ingest" "$DOCparse_BODY"
 
 echo "== docparse validation errors =="
-check "docparse empty blocks 422" POST "/api/v1/docparse/ingest" \
+# 422 bodies legitimately differ (pydantic per-field list vs single detail
+# string), so compare status codes only.
+check_status() {
+    local name="$1" method="$2" path="$3" body="${4:-}"
+    local py_code rs_code
+    py_code=$(curl -s -o /dev/null -w '%{http_code}' -X "$method" "$PY_URL$path" \
+        -H "X-User-Id: $USER_ID" -H 'Content-Type: application/json' -d "$body")
+    rs_code=$(curl -s -o /dev/null -w '%{http_code}' -X "$method" "$RS_URL$path" \
+        -H "X-User-Id: $USER_ID" -H 'Content-Type: application/json' -d "$body")
+    if [[ "$py_code" == "$rs_code" ]]; then
+        echo "PASS  $name ($py_code)"
+    else
+        echo "FAIL  $name py=$py_code rs=$rs_code"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+check_status "docparse empty blocks 422" POST "/api/v1/docparse/ingest" \
     '{"documentId":"x","source":"s","index":false,"includeChunks":true,"blocks":[]}'
-check "docparse overlap>=size 422" POST "/api/v1/docparse/ingest" \
-    '{"documentId":"x","source":"s","index":false,"includeChunks":true,"chunkSize":100,"overlap":100,"blocks":[{"text":"hi"}]}'
-check "docparse nothing-to-do 422" POST "/api/v1/docparse/ingest" \
-    '{"documentId":"x","source":"s","index":false,"includeChunks":false,"blocks":[{"text":"hi"}]}'
+check_status "docparse overlap>=size 422" POST "/api/v1/docparse/ingest" \
+    '{"documentId":"x","source":"s","index":false,"includeChunks":true,"chunkSize":100,"overlap":100,"blocks":[{"markdown":"hi"}]}'
+check_status "docparse nothing-to-do 422" POST "/api/v1/docparse/ingest" \
+    '{"documentId":"x","source":"s","index":false,"includeChunks":false,"blocks":[{"markdown":"hi"}]}'
+
+echo "== wire-format parity (snake_case aliases, ISO datetimes, 422s) =="
+# Bodies are identical on both engines for these — full-body compare.
+check "docparse snake_case body" POST "/api/v1/docparse/ingest" \
+    '{"document_id":"snake-1","source":"s","index":false,"include_chunks":true,"blocks":[{"markdown":"hi","page_start":1,"page_end":1}]}'
+check "docparse expires_at RFC3339" POST "/api/v1/docparse/ingest" \
+    '{"documentId":"dt-1","source":"s","index":false,"includeChunks":true,"expiresAt":"2030-01-02T03:04:05Z","blocks":[{"markdown":"hi","pageStart":1,"pageEnd":1}]}'
+check_status "docparse expires_at date-only" POST "/api/v1/docparse/ingest" \
+    '{"documentId":"dt-2","source":"s","index":false,"includeChunks":true,"expiresAt":"2030-01-02","blocks":[{"markdown":"hi","pageStart":1,"pageEnd":1}]}'
+check_status "docparse expires_at space-sep naive" POST "/api/v1/docparse/ingest" \
+    '{"documentId":"dt-3","source":"s","index":false,"includeChunks":true,"expiresAt":"2030-01-02 03:04:05","blocks":[{"markdown":"hi","pageStart":1,"pageEnd":1}]}'
+check_status "docparse malformed json 422" POST "/api/v1/docparse/ingest" '{bad'
+check_status "docparse unknown field 422" POST "/api/v1/docparse/ingest" \
+    '{"documentId":"x","bogus":1,"blocks":[{"markdown":"hi","pageStart":1,"pageEnd":1}]}'
+check_status "docparse chunkSize range 422" POST "/api/v1/docparse/ingest" \
+    '{"documentId":"x","source":"s","index":false,"includeChunks":true,"chunkSize":10,"blocks":[{"markdown":"hi","pageStart":1,"pageEnd":1}]}'
+check_status "docparse empty documentId 422" POST "/api/v1/docparse/ingest" \
+    '{"documentId":"","source":"s","index":false,"includeChunks":true,"blocks":[{"markdown":"hi","pageStart":1,"pageEnd":1}]}'
 
 echo "== auth =="
 # Both engines must reject a protected route without X-User-Id when
