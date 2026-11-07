@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 
 use axum::response::Response;
-use lopdf::Object;
+use lopdf::{Document, Object};
 
 use crate::error::{AppError, AppResult};
 use crate::handlers::jobs::AppState;
@@ -202,6 +202,9 @@ fn scale_pages(
 
 /// `POST /api/v1/general/crop` — clips the selected pages to `x/y/width/height`
 /// in PDF user space. `autoCrop` is rejected: it needs rasterisation.
+/// `removeDataOutsideCrop` (Java default) distils the selected pages through
+/// Ghostscript `-dUseCropBox`; without gs, or when the flag is false, the
+/// clip-only wrap is used — Java's PDFBox fallback.
 #[stirling_macros::endpoint]
 fn crop_pdf(
     _state: AppState,
@@ -228,12 +231,6 @@ fn crop_pdf(
             )
         })
         .unwrap_or(true);
-    if remove_data {
-        return Err(AppError::BadRequest(
-            "removeDataOutsideCrop=true is not supported by the Rust backend; crop is clip-only"
-                .into(),
-        ));
-    }
     let x = float_param(&params, "x")?.ok_or_else(|| {
         AppError::BadRequest("crop coordinates (x, y, width, height) are required".into())
     })?;
@@ -261,6 +258,24 @@ fn crop_pdf(
         .into_iter()
         .collect();
 
+    let gs = crate::settings::engine_program("gs");
+    if remove_data && crate::convert::find_executable(&gs, &[]).is_some() {
+        let bytes = crop_with_ghostscript(
+            &upload,
+            &mut document,
+            x,
+            y,
+            width,
+            height,
+            &selected,
+            total_pages,
+        )?;
+        return Ok(pdf_response(
+            bytes,
+            &output_name(Some(&upload.name), "_cropped.pdf"),
+        ));
+    }
+
     for (index, page_id) in page_ids.into_iter().enumerate() {
         if !selected.contains(&index) {
             continue;
@@ -280,6 +295,83 @@ fn crop_pdf(
         bytes,
         &output_name(Some(&upload.name), "_cropped.pdf"),
     ))
+}
+
+/// Java's `cropWithGhostscript`: stamp `/CropBox` on a document holding only
+/// the selected pages, distill it through `gs -dUseCropBox` so marks outside
+/// the box are dropped, then merge those pages back with the untouched ones
+/// — unselected pages never pass through the re-distill.
+fn crop_with_ghostscript(
+    upload: &Upload,
+    src: &mut Document,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    selected: &HashSet<usize>,
+    total_pages: usize,
+) -> AppResult<Vec<u8>> {
+    let selected_list: Vec<usize> = (0..total_pages).filter(|i| selected.contains(i)).collect();
+    let mut sel_doc = pdfdoc::new_document();
+    pdfdoc::import_pages(&mut sel_doc, src, &selected_list)?;
+    let crop_box = Object::Array(
+        [x, y, x + width, y + height]
+            .iter()
+            .map(|v| Object::Real(*v as f32))
+            .collect(),
+    );
+    for page_id in pdfdoc::page_ids(&sel_doc) {
+        sel_doc
+            .get_dictionary_mut(page_id)
+            .map_err(|e| AppError::Pdf(format!("page dict: {e}")))?
+            .set("CropBox", crop_box.clone());
+    }
+    let sel_bytes = pdfdoc::save(&mut sel_doc)?;
+
+    let dir = tempfile::tempdir()
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("crop tempdir: {e}")))?;
+    let input = dir.path().join("input.pdf");
+    let output = dir.path().join("output.pdf");
+    std::fs::write(&input, &sel_bytes)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("write crop input: {e}")))?;
+    let program = crate::convert::resolve(&crate::settings::engine_program("gs"));
+    let spec = crate::convert::EngineSpec::new(&program)
+        .args([
+            "-dNOPAUSE".to_string(),
+            "-dBATCH".to_string(),
+            "-dQUIET".to_string(),
+            "-dSAFER".to_string(),
+            "-sDEVICE=pdfwrite".to_string(),
+            "-dUseCropBox".to_string(),
+            format!("-sOutputFile={}", output.display()),
+        ])
+        .arg(input.to_string_lossy().to_string())
+        .timeout(std::time::Duration::from_secs(600));
+    let out = crate::convert::run(&spec)?;
+    crate::convert::require_success("gs", &out)?;
+    let cropped_bytes = std::fs::read(&output)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("read gs crop output: {e}")))?;
+    let mut cropped = pdfdoc::load(&upload.name, &cropped_bytes)?;
+    if pdfdoc::page_ids(&cropped).len() != selected_list.len() {
+        return Err(AppError::Pdf(format!(
+            "ghostscript returned {} pages for {} selected pages",
+            pdfdoc::page_ids(&cropped).len(),
+            selected_list.len()
+        )));
+    }
+
+    let mut merged = pdfdoc::new_document();
+    pdfdoc::import_info(&mut merged, src)?;
+    let mut gs_index = 0usize;
+    for index in 0..total_pages {
+        if selected.contains(&index) {
+            pdfdoc::import_pages(&mut merged, &mut cropped, &[gs_index])?;
+            gs_index += 1;
+        } else {
+            pdfdoc::import_pages(&mut merged, src, &[index])?;
+        }
+    }
+    pdfdoc::save(&mut merged)
 }
 
 #[cfg(test)]

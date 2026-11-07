@@ -204,6 +204,10 @@ pub fn router(state: AppState) -> Router {
             post(security::accessibility_report),
         )
         .route(
+            "/api/v1/security/cert-sign",
+            post(crate::certsign::cert_sign),
+        )
+        .route(
             "/api/v1/security/validate-signature",
             post(crate::signature::validate_signature),
         )

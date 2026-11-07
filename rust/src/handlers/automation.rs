@@ -1276,7 +1276,7 @@ fn auto_split_pdf(
 
     let document = pdfdoc::load(&upload.name, &upload.bytes)?;
     let page_ids = pdfdoc::page_ids(&document);
-    let rasterizer = misc::BlankRasterizer::probe(&upload.name, &upload.bytes);
+    let rasterizer = misc::BlankRasterizer::probe(&upload.bytes);
 
     let mut groups: Vec<Vec<u32>> = Vec::new();
     let mut page = 0usize;

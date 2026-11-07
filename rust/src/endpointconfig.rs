@@ -368,8 +368,6 @@ fn group_table() -> &'static [(&'static str, &'static [&'static str])] {
 /// Several are frontend-composed tools that decompose into routed calls —
 /// disabling the key would hide a working tool.
 const UNSUPPORTED_ENDPOINTS: &[&str] = &[
-    // CMS/PKCS#7 signing — needs a crypto stack Rust does not have.
-    "cert-sign",
     // Proprietary modules with no Rust port.
     "ingest",
     // Proprietary/AI/integration surface queried by path-derived keys.
@@ -470,6 +468,11 @@ impl EndpointConfig {
         for endpoint in UNSUPPORTED_ENDPOINTS {
             config.disable_endpoint(endpoint, DisableReason::NotSupported);
         }
+        // `cert-sign` itself is routed (`crate::certsign`), but its
+        // hardware-signing and signing-session subpaths share the endpoint
+        // key while having no Rust route — disable them by path so the
+        // guard reports them unavailable instead of 404ing.
+        config.disable_pattern("/api/v1/security/cert-sign/*");
         if !settings.system.enable_url_to_pdf {
             config.disable_endpoint("url-to-pdf", DisableReason::Config);
         }
@@ -995,23 +998,27 @@ mod tests {
     #[test]
     fn unrouted_endpoints_report_not_supported() {
         init(&Settings::default());
-        for key in ["cert-sign", "ingest"] {
+        for key in ["ingest"] {
             let (enabled, reason) = endpoint_availability(key);
             assert!(!enabled, "{key} should be disabled");
             assert_eq!(reason, Some(DisableReason::NotSupported), "{key}");
         }
-        // `timestamp-pdf` is routed natively (`crate::timestamp`).
+        // `timestamp-pdf` and `cert-sign` are routed natively.
         assert!(is_endpoint_enabled("/api/v1/security/timestamp-pdf"));
+        assert!(is_endpoint_enabled("/api/v1/security/cert-sign"));
         // `restore-pdf-protection` is routed natively (`passwords`).
         assert!(is_endpoint_enabled(
             "/api/v1/security/restore-pdf-protection"
         ));
-        // Path spellings resolve to the same key.
-        let (enabled, reason) = endpoint_availability("/api/v1/security/cert-sign");
-        assert!(!enabled);
-        assert_eq!(reason, Some(DisableReason::NotSupported));
-        // Hardware-signing subpaths collapse to the `cert-sign` key.
-        assert!(!is_endpoint_enabled("/api/v1/security/cert-sign/sessions"));
+        // Hardware-signing and signing-session subpaths have no Rust route;
+        // they are disabled by path even though they share the `cert-sign`
+        // endpoint key.
+        assert!(!is_endpoint_enabled_for_uri(
+            "/api/v1/security/cert-sign/sessions"
+        ));
+        assert!(!is_endpoint_enabled_for_uri(
+            "/api/v1/security/cert-sign/hardware/capabilities"
+        ));
         // Routed endpoints and frontend-composed keys stay enabled.
         for key in [
             "merge-pdfs",

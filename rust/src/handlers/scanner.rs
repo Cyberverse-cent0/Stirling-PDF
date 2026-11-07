@@ -153,7 +153,7 @@ fn scanner_effect(
         )));
     }
     let bytes: &[u8] = &upload.bytes;
-    let rasterizer = BlankRasterizer::probe(&upload.name, bytes)
+    let rasterizer = BlankRasterizer::probe(bytes)
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Ghostscript is required")))?;
     let source = pdfdoc::load(&upload.name, bytes)?;
     let page_ids = pdfdoc::page_ids(&source);

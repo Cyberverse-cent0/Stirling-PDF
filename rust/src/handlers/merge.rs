@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use axum::body::Body;
 use axum::http::header;
 use axum::response::Response;
-use lopdf::Document;
+use lopdf::{Dictionary, Document, Object};
 
 use crate::error::{AppError, AppResult};
 use crate::handlers::jobs::AppState;
@@ -18,8 +18,12 @@ struct Loaded {
 /// `POST /api/v1/general/merge-pdfs` — merges uploaded PDFs in the order
 /// implied by `fileOrder`/`sortType`, mirroring `MergeController`.
 ///
-/// Subset of the Java endpoint for now: `generateToc` and `removeCertSign=false`
-/// are rejected rather than silently producing a different document.
+/// `generateToc` is rejected rather than silently producing a different
+/// document. `removeCertSign=false` is honoured by re-registering the
+/// signature field-widgets that page import carried over as annotations;
+/// signature fields whose field dictionary is not itself a page annotation
+/// (hierarchical fields) cannot be recovered and are dropped, as are all
+/// non-signature form fields.
 #[stirling_macros::endpoint]
 fn merge_pdfs(
     _state: AppState,
@@ -55,11 +59,6 @@ fn merge_pdfs(
             "generateToc is not yet supported by the Rust backend".into(),
         ));
     }
-    if !remove_cert_sign {
-        return Err(AppError::BadRequest(
-            "removeCertSign=false is not yet supported by the Rust backend".into(),
-        ));
-    }
 
     let mut loaded = Vec::with_capacity(files.len());
     for file in files.drain(..) {
@@ -79,12 +78,61 @@ fn merge_pdfs(
     if let Some(first) = loaded.first() {
         pdfdoc::import_info(&mut merged, &first.document)?;
     }
+    if !remove_cert_sign {
+        preserve_signature_fields(&mut merged)?;
+    }
     let bytes = pdfdoc::save(&mut merged)?;
 
     let first = loaded.first().map(|l| l.name.as_str());
     let out_name = output_name(first, "_merged_unsigned.pdf");
 
     Ok(pdf_response(bytes, &out_name))
+}
+
+/// Page import drops every document-level structure, so signature
+/// field-widgets arrive as orphan annotations. `removeCertSign=false`
+/// re-registers the ones that are merged field-widget dictionaries
+/// (`/FT /Sig` on the annotation itself) under a fresh `/AcroForm`.
+fn preserve_signature_fields(doc: &mut Document) -> AppResult<()> {
+    let mut fields = Vec::new();
+    for page_id in pdfdoc::page_ids(doc) {
+        let Ok(page) = doc.get_dictionary(page_id) else {
+            continue;
+        };
+        let Ok(annots) = page.get(b"Annots").and_then(|a| a.as_array()) else {
+            continue;
+        };
+        for annot in annots {
+            let Object::Reference(id) = annot else {
+                continue;
+            };
+            let is_sig = doc
+                .get_dictionary(*id)
+                .ok()
+                .and_then(|d| d.get(b"FT").ok())
+                .and_then(|ft| ft.as_name().ok())
+                == Some(b"Sig");
+            if is_sig {
+                fields.push(Object::Reference(*id));
+            }
+        }
+    }
+    if fields.is_empty() {
+        return Ok(());
+    }
+    let mut acro = Dictionary::new();
+    acro.set("Fields", Object::Array(fields));
+    acro.set("SigFlags", Object::Integer(3));
+    let acro_id = doc.new_object_id();
+    doc.objects.insert(acro_id, Object::Dictionary(acro));
+    let root = match doc.trailer.get(b"Root") {
+        Ok(Object::Reference(id)) => *id,
+        _ => return Err(AppError::Pdf("merged document has no catalog".into())),
+    };
+    doc.get_dictionary_mut(root)
+        .map_err(|e| AppError::Pdf(format!("catalog: {e}")))?
+        .set("AcroForm", Object::Reference(acro_id));
+    Ok(())
 }
 
 /// Spring's boolean conversion accepts the usual truthy/falsy spellings.
@@ -249,27 +297,34 @@ mod tests {
     }
 
     #[test]
-    fn merge_rejects_unsupported_options() {
+    fn merge_rejects_generate_toc() {
         let bytes = testkit::Pdf::new().bytes();
-        for (params, needle) in [
-            (vec![("generateToc".into(), "true".into())], "generateToc"),
-            (
-                vec![("removeCertSign".into(), "false".into())],
-                "removeCertSign",
-            ),
-        ] {
-            let err = merge_pdfs_work(
-                AppState::new(),
-                HashMap::new(),
-                vec![upload("a.pdf", bytes.clone())],
-                params,
-            )
-            .unwrap_err();
-            match err {
-                AppError::BadRequest(m) => assert!(m.contains(needle), "{m}"),
-                other => panic!("expected BadRequest, got {other}"),
-            }
+        let err = merge_pdfs_work(
+            AppState::new(),
+            HashMap::new(),
+            vec![upload("a.pdf", bytes)],
+            vec![("generateToc".into(), "true".into())],
+        )
+        .unwrap_err();
+        match err {
+            AppError::BadRequest(m) => assert!(m.contains("generateToc"), "{m}"),
+            other => panic!("expected BadRequest, got {other}"),
         }
+    }
+
+    #[tokio::test]
+    async fn merge_accepts_remove_cert_sign_false() {
+        let mut a = testkit::Pdf::new();
+        a.add_page([0, 0, 500, 500], lopdf::Dictionary::new());
+        let response = merge_pdfs_work(
+            AppState::new(),
+            HashMap::new(),
+            vec![upload("a.pdf", a.bytes())],
+            vec![("removeCertSign".into(), "false".into())],
+        )
+        .unwrap();
+        let doc = testkit::response_document(response).await;
+        assert_eq!(pdfdoc::page_ids(&doc).len(), 2);
     }
 
     #[test]

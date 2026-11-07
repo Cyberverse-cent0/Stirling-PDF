@@ -2,6 +2,7 @@
 mod apitests;
 mod attachments;
 mod auth;
+mod certsign;
 mod config;
 mod convert;
 mod endpointconfig;

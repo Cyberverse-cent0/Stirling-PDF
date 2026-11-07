@@ -55,6 +55,9 @@ hmac = "0.12"
 des = "0.8"
 cbc = "0.1"
 rc2 = "0.8"
+aes = "0.8"
+pbkdf2 = "0.12"
+sec1 = "0.7"
 sha1 = { version = "0.10.7", features = ["oid"] }
 sha2 = { version = "0.10.9", features = ["oid"] }
 signature = "2"

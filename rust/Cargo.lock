@@ -3385,6 +3385,7 @@ dependencies = [
 name = "stirling-server"
 version = "0.1.0"
 dependencies = [
+ "aes 0.8.4",
  "ammonia",
  "anyhow",
  "axum",
@@ -3409,6 +3410,7 @@ dependencies = [
  "mail-parser",
  "p256",
  "p384",
+ "pbkdf2",
  "pkcs12",
  "pkcs8",
  "qrcode",
@@ -3420,6 +3422,7 @@ dependencies = [
  "rsa",
  "rusqlite",
  "rustls-native-certs",
+ "sec1",
  "serde",
  "serde_json",
  "serde_yml",

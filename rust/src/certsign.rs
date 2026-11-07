@@ -34,16 +34,14 @@ use cms::builder::{SignedDataBuilder, SignerInfoBuilder};
 use cms::cert::{CertificateChoices, IssuerAndSerialNumber};
 use cms::content_info::ContentInfo;
 use cms::encrypted_data::EncryptedData;
-use cms::enveloped_data::EncryptedContentInfo;
 use cms::signed_data::{EncapsulatedContentInfo, SignerIdentifier};
 use der::asn1::{
     BitString, BmpString, ObjectIdentifier, OctetString, PrintableStringRef, TeletexStringRef,
     Utf8StringRef,
 };
 use der::{Any, Decode, Encode, Sequence};
-use lopdf::{Dictionary, Document, Object, Stream, StringFormat};
+use lopdf::{dictionary, Dictionary, Document, Object, Stream, StringFormat};
 use pkcs8::PrivateKeyInfo;
-use serde_json::Value;
 use sha2::Digest as _;
 use signature::{Keypair, Signer};
 use spki::{AlgorithmIdentifierOwned, DynSignatureAlgorithmIdentifier, SignatureBitStringEncoding};
@@ -59,7 +57,7 @@ use crate::timestamp::{
     embed_signature_token, prepare_signed_revision, pdf_date_now, AppearanceFactory,
     RESERVED_CONTENTS_LEN,
 };
-use crate::upload::{first_upload, output_name, param, param_bool, param_parse, Upload, FILE_FIELD};
+use crate::upload::{first_upload, output_name, param, param_bool, param_parse, Upload};
 
 const OID_DATA: &str = "1.2.840.113549.1.7.1";
 const OID_ENCRYPTED_DATA: &str = "1.2.840.113549.1.7.6";
@@ -348,12 +346,12 @@ impl Signer<CmsSignature> for SigningKey {
             Self::P256(k) => k.try_sign(msg).and_then(|s| {
                 s.to_der()
                     .map(|d| CmsSignature(d.to_bytes().to_vec()))
-                    .map_err(signature::Error::from_source)
+                    .map_err(|_| signature::Error::new())
             }),
             Self::P384(k) => k.try_sign(msg).and_then(|s| {
                 s.to_der()
                     .map(|d| CmsSignature(d.to_bytes().to_vec()))
-                    .map_err(signature::Error::from_source)
+                    .map_err(|_| signature::Error::new())
             }),
             Self::Ed25519(k) => k.try_sign(msg),
         }
@@ -444,7 +442,7 @@ fn build_cms_signed_data(identity: &SigningIdentity, covered_hash: &[u8; 32]) ->
         sid,
         sha256_alg_id(),
         &eci,
-        Some(covered_hash),
+        Some(&covered_hash[..]),
     )
     .map_err(|e| AppError::Internal(anyhow::anyhow!("CMS signer init: {e}")))?;
     signer_builder
@@ -800,7 +798,13 @@ fn collect_safe_contents(
 fn bag_inner_der(bag_value: &[u8]) -> AppResult<Vec<u8>> {
     let any = Any::from_der(bag_value)
         .map_err(|e| AppError::BadRequest(format!("Invalid argument: PKCS12 keystore: {e}")))?;
-    if any.tag() != der::Tag::ContextSpecific {
+    if !matches!(
+        any.tag(),
+        der::Tag::ContextSpecific {
+            constructed: true,
+            number: der::TagNumber::N0
+        }
+    ) {
         return Err(AppError::BadRequest(
             "Invalid argument: PKCS12 keystore - malformed safe bag".into(),
         ));
@@ -838,12 +842,10 @@ fn bag_attributes(bag: &pkcs12::safe_bag::SafeBag) -> (Option<String>, Option<Ve
 }
 
 fn bmp_string_to_string(bmp: &BmpString) -> String {
-    let bytes = bmp.as_bytes();
-    let units: Vec<u16> = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|c| u16::from_be_bytes(*c))
+    let units: Vec<u16> = bmp
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|c| u16::from_be_bytes([c[0], c[1]]))
         .collect();
     String::from_utf16_lossy(&units)
 }
@@ -886,12 +888,17 @@ fn identity_from_pkcs12(
         unreachable!()
     };
 
-    let pki = if *shrouded {
-        decrypt_shrouded_keybag(pki_der, password)?
+    // The bag value is either plain PKCS#8 or an EncryptedPrivateKeyInfo;
+    // decrypt first so the borrow stays inside this scope.
+    let decrypted;
+    let pki_der: &[u8] = if *shrouded {
+        decrypted = decrypt_shrouded_keybag(pki_der, password)?;
+        &decrypted
     } else {
-        PrivateKeyInfo::from_der(pki_der)
-            .map_err(|e| AppError::BadRequest(format!("Invalid argument: PKCS12 keystore: {e}")))?
+        pki_der
     };
+    let pki = PrivateKeyInfo::from_der(pki_der)
+        .map_err(|e| AppError::BadRequest(format!("Invalid argument: PKCS12 keystore: {e}")))?;
     let key = signer_from_private_key_info(&pki)?;
 
     let mut certs: Vec<Certificate> = Vec::new();
@@ -910,50 +917,35 @@ fn identity_from_pkcs12(
     Ok(SigningIdentity { key, chain })
 }
 
-/// `pkcs8ShroudedKeyBag`: an `EncryptedPrivateKeyInfo`. PBES2 goes through
-/// pkcs8's decryptor (both password encodings are tried); PKCS#12-KDF PBE
-/// is decrypted here.
-fn decrypt_shrouded_keybag(der: &[u8], password: &str) -> AppResult<PrivateKeyInfo<'static>> {
-    let encrypted = pkcs8::EncryptedPrivateKeyInfo::from_der(der).map_err(|e| {
+/// `pkcs8ShroudedKeyBag`: an `EncryptedPrivateKeyInfo`. Parsed with the
+/// pkcs12 crate's type because pkcs8's decoder rejects the PKCS#12-KDF
+/// PBE OIDs (1.2.840.113549.1.12.1.x). Returns the plaintext PKCS#8 DER.
+fn decrypt_shrouded_keybag(der: &[u8], password: &str) -> AppResult<Vec<u8>> {
+    let encrypted = pkcs12::pbe_params::EncryptedPrivateKeyInfo::from_der(der).map_err(|e| {
         AppError::BadRequest(format!("Invalid argument: PKCS12 keystore: {e}"))
     })?;
-    let alg = encrypted.encryption_algorithm.oid().to_string();
+    let alg = encrypted.encryption_algorithm.oid.to_string();
+    let ciphertext = encrypted.encrypted_data.as_bytes();
+    let params_der = encrypted
+        .encryption_algorithm
+        .parameters
+        .as_ref()
+        .ok_or_else(|| AppError::BadRequest("PKCS12: missing PBE parameters".into()))?
+        .to_der()
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("PBE params encode: {e}")))?;
+
     match alg.as_str() {
         OID_PBES2 => {
-            // RFC 7292 does not pin the PBKDF2 password encoding; try the
-            // BMPString form, then the raw password.
-            let bmp = p12_password_bytes(password)?;
-            for pw in [bmp, password.as_bytes().to_vec()] {
-                if let Ok(doc) = encrypted.decrypt(&pw) {
-                    if let Ok(pki) = PrivateKeyInfo::from_der(doc.as_bytes()) {
-                        return Ok(pki.into_owned());
-                    }
-                }
-            }
-            Err(AppError::BadRequest(
-                "Invalid argument: password - the PKCS12 keystore password is incorrect or missing"
-                    .into(),
-            ))
+            let pbes2 = pkcs12::pbe_params::Pbes2Params::from_der(&params_der).map_err(|e| {
+                AppError::BadRequest(format!("Invalid argument: PKCS12 keystore: {e}"))
+            })?;
+            decrypt_pbes2(&pbes2, password, ciphertext)
         }
         PBE_3DES_CBC | PBE_2KEY_3DES_CBC | PBE_RC2_128_CBC | PBE_RC2_40_CBC => {
-            let alg_id = encrypted.encryption_algorithm.algorithm_identifier();
-            let params_der = alg_id
-                .parameters
-                .as_ref()
-                .ok_or_else(|| {
-                    AppError::BadRequest("PKCS12: missing PBE parameters".into())
-                })?
-                .to_der()
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("PBE params encode: {e}")))?;
             let pbe = pkcs12::pbe_params::Pkcs12PbeParams::from_der(&params_der).map_err(|e| {
                 AppError::BadRequest(format!("Invalid argument: PKCS12 keystore: {e}"))
             })?;
-            let plain = decrypt_pkcs12_pbe(&alg, &pbe, password, encrypted.encrypted_data)?;
-            PrivateKeyInfo::from_der(&plain)
-                .map(|pki| pki.into_owned())
-                .map_err(|e| {
-                    AppError::BadRequest(format!("Invalid argument: PKCS12 keystore: {e}"))
-                })
+            decrypt_pkcs12_pbe(&alg, &pbe, password, ciphertext)
         }
         _ => Err(AppError::BadRequest(format!(
             "PKCS12: unsupported key encryption algorithm {alg}"

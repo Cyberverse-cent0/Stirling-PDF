@@ -282,21 +282,18 @@ fn decompress_pdf(
 }
 
 /// `POST /api/v1/misc/flatten` — `flattenOnlyForms=true` merges AcroForm
-/// widget appearances into the page content natively. The default path
-/// rasterises every page and rebuilds the document image-only; that mode
-/// has no native implementation, so it is rejected rather than
-/// approximated.
+/// widget appearances into the page content natively; the default path
+/// rasterises every page and rebuilds the document image-only via
+/// Ghostscript, matching Java's JPDFium render.
 #[stirling_macros::endpoint]
 fn flatten(
-    _state: AppState,
-    _query: HashMap<String, String>,
+    state: AppState,
+    query: HashMap<String, String>,
     uploads: Vec<Upload>,
     params: Vec<(String, String)>,
 ) -> AppResult<Response> {
     if !param_bool(&params, "flattenOnlyForms") {
-        return Err(AppError::BadRequest(
-            "flatten without flattenOnlyForms rasterises every page, which the Rust backend does not implement".into(),
-        ));
+        return flatten_raster_work(state, query, uploads, params);
     }
     let Some(upload) = uploads.into_iter().next() else {
         return Err(AppError::BadRequest(format!("{FILE_FIELD} is required")));
@@ -314,7 +311,6 @@ fn flatten(
 /// `PDFRenderer.renderImageWithDPI` + `JPEGFactory` in Java. The Rust
 /// settings tree has no `system.maxDPI`, so the ceiling stays at Java's
 /// 300 DPI default; an explicit `renderDpi` clamps to [72, 300].
-#[allow(dead_code)] // raster /flatten not yet routed
 fn flatten_raster_work(
     _state: AppState,
     _query: HashMap<String, String>,
@@ -2679,7 +2675,7 @@ fn remove_blanks(
 
     let document = pdfdoc::load(&upload.name, &upload.bytes)?;
     let page_ids = pdfdoc::page_ids(&document);
-    let rasterizer = BlankRasterizer::probe(&upload.name, &upload.bytes);
+    let rasterizer = BlankRasterizer::probe(&upload.bytes);
     let mut kept = Vec::new();
     let mut blanked = Vec::new();
     for (index, &page_id) in page_ids.iter().enumerate() {
@@ -2736,7 +2732,9 @@ pub(crate) struct BlankRasterizer {
 }
 
 impl BlankRasterizer {
-    pub(crate) fn probe(name: &str, bytes: &[u8]) -> Option<Self> {
+    /// The temp input keeps a fixed name: uploaded filenames are
+    /// attacker-controlled and `..` would escape the tempdir.
+    pub(crate) fn probe(bytes: &[u8]) -> Option<Self> {
         let program = crate::convert::resolve(&crate::settings::engine_program("gs"));
         let gs_ok = std::process::Command::new(&program)
             .arg("--version")
@@ -2749,7 +2747,7 @@ impl BlankRasterizer {
             return None;
         }
         let dir = tempfile::tempdir().ok()?;
-        let input = dir.path().join(format!("{name}.pdf"));
+        let input = dir.path().join("input.pdf");
         std::fs::write(&input, bytes).ok()?;
         Some(Self {
             program: gs_ok.then_some(program),

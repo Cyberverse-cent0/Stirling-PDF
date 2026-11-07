@@ -300,7 +300,7 @@ fn tesseract_fallback(
             .map_err(|e| AppError::Internal(anyhow::anyhow!("read input: {e}")))?,
     )?;
     let page_ids = pdfdoc::page_ids(&document);
-    let rasterizer = BlankRasterizer::probe(name, &std::fs::read(input).unwrap_or_default());
+    let rasterizer = BlankRasterizer::probe(&std::fs::read(input).unwrap_or_default());
     let tesseract = settings::engine_program("tesseract");
     let lang_arg = languages.join("+");
 

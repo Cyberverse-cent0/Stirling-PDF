@@ -174,7 +174,7 @@ fn input_images(upload: &Upload) -> AppResult<Vec<RgbImage>> {
     if page_count == 0 {
         return Ok(Vec::new());
     }
-    let rasterizer = BlankRasterizer::probe(&upload.name, &upload.bytes)
+    let rasterizer = BlankRasterizer::probe(&upload.bytes)
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Ghostscript is required")))?;
     let rasterizer = &rasterizer;
     let dpi = scan_dpi();
